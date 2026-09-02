@@ -64,7 +64,7 @@ this repository and are not redistributed by it. See
 
 | Item | Requirement |
 | --- | --- |
-| GPU | NVIDIA ships DLSS 5 for the RTX 50 series. Through this community runtime it also runs on RTX 40. RTX 20 and older are refused, and RTX 30 is refused unless the installed add-on and neural runtime match one specific verified pair by SHA-256; see [Troubleshooting](#troubleshooting) |
+| GPU | NVIDIA ships DLSS 5 for the RTX 50 series. Through this community runtime it also runs on RTX 40 and 30. RTX 20 and older are refused |
 | Driver | Current NVIDIA GeForce driver |
 | ComfyUI | A build with the V3 node API (`comfy_api.latest`) |
 | Python | `numpy`, `av` and OpenCV. ComfyUI portable normally ships all three; `opencv-python` is deliberately not in `requirements.txt` so it cannot overwrite an existing `opencv-contrib-python` |
