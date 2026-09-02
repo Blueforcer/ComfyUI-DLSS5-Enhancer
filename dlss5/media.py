@@ -25,6 +25,7 @@ NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 PROBE_TIMEOUT = 300
 MUX_TIMEOUT = 3600
+FLUSH_TIMEOUT = 120
 
 
 def require_av() -> None:
@@ -195,7 +196,7 @@ def _encoder_available_cached(ffmpeg: str, encoder: str, width: int, height: int
 
 
 def _encoder_available(ffmpeg: str, encoder: str, width: int, height: int) -> bool:
-    """Cache only successes, so a transient probe failure is not permanent."""
+    """Re-probe once after a negative result, so a transient failure is not permanent."""
     if _encoder_available_cached(ffmpeg, encoder, width, height):
         return True
     _encoder_available_cached.cache_clear()
@@ -308,13 +309,18 @@ class RawFrameEncoder:
             str(target),
         ]
         require_av()
-        self.process = subprocess.Popen(
-            command,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            creationflags=NO_WINDOW,
-        )
+        try:
+            self.process = subprocess.Popen(
+                command,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                creationflags=NO_WINDOW,
+            )
+        except OSError as exc:
+            raise RuntimeError(
+                f"ffmpeg at {layout.ffmpeg} could not be started: {exc}"
+            ) from exc
         self.logs: list[str] = []
         # PyAV containers are not thread safe: the writer thread and a cancelling
         # main thread must never touch this one at the same time.
@@ -336,7 +342,7 @@ class RawFrameEncoder:
         except BaseException:
             # The log thread keeps this object alive, which would keep stdin open
             # and leave ffmpeg waiting for input forever.
-            self.process.kill()
+            self._kill()
             self._log_thread.join(timeout=5)
             raise
 
@@ -358,19 +364,25 @@ class RawFrameEncoder:
         frame.time_base = self._time_base
         with self._lock:
             if self._finished:
-                raise RuntimeError("The encoder is already closed; frame dropped.")
+                raise RuntimeError("The encoder is already closed, so the render is incomplete.")
             for packet in self._stream.encode(frame):
                 self._container.mux(packet)
 
     def close(self) -> None:
         """Flush the encoder and require a clean ffmpeg exit."""
-        with self._lock:
-            if self._finished:
-                return
-            self._finished = True
-            for packet in self._stream.encode(None):
-                self._container.mux(packet)
-            self._container.close()
+        watchdog = threading.Timer(FLUSH_TIMEOUT, self._kill)
+        watchdog.daemon = True
+        watchdog.start()
+        try:
+            with self._lock:
+                if self._finished:
+                    return
+                self._finished = True
+                for packet in self._stream.encode(None):
+                    self._container.mux(packet)
+                self._container.close()
+        finally:
+            watchdog.cancel()
         if self.process.stdin and not self.process.stdin.closed:
             self.process.stdin.close()
         try:
@@ -384,11 +396,16 @@ class RawFrameEncoder:
             raise RuntimeError("ffmpeg encoding failed:\n" + "\n".join(self.logs[-40:]))
 
     def _kill(self) -> None:
+        """Kill ffmpeg and wait for it, so its handle on the output is released."""
         if self.process.poll() is None:
             try:
                 self.process.kill()
             except OSError:
                 pass
+        try:
+            self.process.wait(timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
         # Drop the buffered pipe explicitly, otherwise its finaliser reports a
         # broken pipe long after the fact.
         if self.process.stdin is not None and not self.process.stdin.closed:
@@ -406,13 +423,12 @@ class RawFrameEncoder:
         """
         self._kill()
         with self._lock:
-            if self._finished:
-                return
-            self._finished = True
-            try:
-                self._container.close()
-            except Exception:
-                pass
+            if not self._finished:
+                self._finished = True
+                try:
+                    self._container.close()
+                except Exception:
+                    pass
         self._log_thread.join(timeout=5)
 
 
@@ -471,6 +487,8 @@ def mux(
         "-y",
         "-i",
         str(rendered),
+        # Input option on the SOURCE below: trims its audio to the rendered
+        # length, which is what makes a max_frames preview mux correctly.
         "-t",
         f"{duration:.9f}",
         "-i",

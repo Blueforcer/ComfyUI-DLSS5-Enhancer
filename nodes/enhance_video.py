@@ -40,29 +40,45 @@ _STOP = object()
 _UNSAFE_PREFIX = set('<>:"/\\|?*')
 
 
+def _source_path(raw: str) -> Path:
+    """Normalise a pasted path the same way everywhere."""
+    return Path(raw.strip().strip('"').strip("'")).expanduser()
+
+
 def _safe_prefix(prefix: str) -> str:
     """Reject a prefix that would traverse directories or look like a CLI flag."""
     cleaned = prefix.strip() or "DLSS5"
-    if any(char in _UNSAFE_PREFIX for char in cleaned) or cleaned.startswith("-"):
+    if any(char in _UNSAFE_PREFIX or ord(char) < 32 for char in cleaned):
         raise ValueError(
             f"filename_prefix {prefix!r} may not contain path separators, drive "
-            "letters or a leading dash."
+            "letters or control characters."
         )
-    if cleaned in {".", ".."}:
-        raise ValueError("filename_prefix must be a file name.")
+    if cleaned.startswith("-") or cleaned in {".", ".."}:
+        raise ValueError("filename_prefix must be a file name and may not start with a dash.")
     return cleaned
 
 
 def _resolve_directory(raw: str) -> Path:
-    """Resolve the output directory, keeping a relative path inside the output dir."""
+    """Resolve the output directory.
+
+    An absolute path is honoured as given, which is what lets people write to a
+    scratch disk. A relative path is resolved inside the ComfyUI output folder
+    and may not escape it.
+    """
     output_root = Path(folder_paths.get_output_directory()).resolve()
     value = raw.strip().strip('"').strip("'")
     if not value:
         return output_root
     candidate = Path(value)
-    if not candidate.is_absolute():
-        candidate = output_root / candidate
-    return candidate.resolve()
+    if candidate.is_absolute():
+        return candidate.resolve()
+    resolved = (output_root / candidate).resolve()
+    if not resolved.is_relative_to(output_root):
+        raise ValueError(
+            f"output_directory {raw!r} points outside the ComfyUI output folder. "
+            "Use an absolute path if that is what you want."
+        )
+    return resolved
 
 
 def _unique_output(directory: Path, prefix: str, extension: str) -> Path:
@@ -74,6 +90,14 @@ def _unique_output(directory: Path, prefix: str, extension: str) -> Path:
         candidate = directory / f"{prefix}_{stamp}_{counter:03d}{extension}"
         counter += 1
     return candidate
+
+
+def _discard(path: Path) -> None:
+    """Remove a partial file, never masking the error that caused the cleanup."""
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        logger.warning("DLSS5: could not remove %s: %s", path, exc)
 
 
 class DLSS5EnhanceVideoFile(io.ComfyNode):
@@ -141,7 +165,7 @@ class DLSS5EnhanceVideoFile(io.ComfyNode):
                     default="",
                     tooltip=(
                         "Empty writes to the ComfyUI output directory. A relative path "
-                        "is resolved inside it."
+                        "is resolved inside it; an absolute path is used as given."
                     ),
                 ),
                 io.Int.Input(
@@ -154,7 +178,10 @@ class DLSS5EnhanceVideoFile(io.ComfyNode):
                 io.Boolean.Input(
                     "copy_audio",
                     default=True,
-                    tooltip="Mux the original audio, subtitles and chapters into the result.",
+                    tooltip=(
+                        "Mux the original audio, and with MKV the subtitles, into the "
+                        "result. Chapters and metadata are kept either way."
+                    ),
                 ),
                 io.Boolean.Input(
                     "verify_neural_rendering",
@@ -174,9 +201,13 @@ class DLSS5EnhanceVideoFile(io.ComfyNode):
 
     @classmethod
     def fingerprint_inputs(cls, video_path: str = "", **kwargs):
-        """Re-run when the source file changed, so a second Run is never a no-op."""
+        """Key the cache on the source file, so editing it in place re-renders.
+
+        Running the node twice with identical inputs replays the cached result
+        and writes no new file; change an input or the source to render again.
+        """
         try:
-            status = Path(video_path.strip().strip('"')).stat()
+            status = _source_path(video_path).stat()
         except OSError:
             return float("nan")
         return (status.st_mtime_ns, status.st_size)
@@ -199,22 +230,26 @@ class DLSS5EnhanceVideoFile(io.ComfyNode):
             raise ValueError(
                 "video_path is empty. Enter the absolute path of the source video file."
             )
-        source = Path(video_path.strip().strip('"').strip("'")).expanduser()
+        source = _source_path(video_path)
         if not source.is_file():
             raise FileNotFoundError(f"No video file at {source}")
         validate_codec_container(codec, container)
 
         layout = resolve_layout(settings)
+        # Discovering ffmpeg is missing after the render would cost the whole job.
+        layout.require_ffmpeg()
+
         options = settings.options
         metadata = probe_video(layout, source)
         if metadata["hdr"]:
             logger.warning(
-                "DLSS5: %s is HDR. The neural renderer works on 8 bit SDR, so the "
-                "result is tone mapped to SDR.",
+                "DLSS5: %s is HDR. The neural renderer works on 8 bit SDR and the "
+                "frames are converted without tone mapping, so highlights will clip.",
                 source.name,
             )
 
         frame_count = int(metadata["frames"])
+        counted_exactly = False
         if frame_count <= 0:
             logger.info(
                 "DLSS5: %s carries no frame count, counting frames. This decodes the "
@@ -222,6 +257,7 @@ class DLSS5EnhanceVideoFile(io.ComfyNode):
                 source.name,
             )
             frame_count = int(probe_video(layout, source, exact_frames=True)["frames"])
+            counted_exactly = True
         if frame_count <= 0:
             raise RuntimeError(f"Could not determine a frame count for {source}.")
         if max_frames:
@@ -244,18 +280,19 @@ class DLSS5EnhanceVideoFile(io.ComfyNode):
                 rendered_path=rendered_path,
                 metadata=metadata,
                 frame_count=frame_count,
+                counted_exactly=counted_exactly,
                 codec=codec,
                 quality=quality,
             )
             try:
                 mux(layout, rendered_path, source, final_path, container, copy_audio=copy_audio)
             except BaseException:
-                final_path.unlink(missing_ok=True)
+                _discard(final_path)
                 raise
         except BaseException:
-            rendered_path.unlink(missing_ok=True)
+            _discard(rendered_path)
             raise
-        rendered_path.unlink(missing_ok=True)
+        _discard(rendered_path)
 
         # Verified only after the file exists, so a verification failure never
         # throws away a finished render.
@@ -276,159 +313,176 @@ class DLSS5EnhanceVideoFile(io.ComfyNode):
         rendered_path: Path,
         metadata: dict,
         frame_count: int,
+        counted_exactly: bool,
         codec: str,
         quality: str,
     ):
         """Decode, render and encode concurrently. Returns (frames, session)."""
-        with DlssSession(
+        session = DlssSession(
             layout,
             options,
             input_width=metadata["width"],
             input_height=metadata["height"],
             frame_count=frame_count,
-        ) as session:
-            encoder = None
-            producer = None
-            writer = None
-            stop = threading.Event()
-            errors: queue.Queue = queue.Queue()
+        )
+        encoder = None
+        producer = None
+        writer = None
+        stop = threading.Event()
+        errors: queue.Queue = queue.Queue()
 
-            try:
-                encoder = RawFrameEncoder(
-                    layout,
-                    rendered_path,
-                    codec=codec,
-                    quality=quality,
-                    width=session.output_width,
-                    height=session.output_height,
-                    rate=metadata["rate"],
-                    time_base=metadata["time_base"],
-                )
+        try:
+            encoder = RawFrameEncoder(
+                layout,
+                rendered_path,
+                codec=codec,
+                quality=quality,
+                width=session.output_width,
+                height=session.output_height,
+                rate=metadata["rate"],
+                time_base=metadata["time_base"],
+            )
 
-                prepared_bytes = session.render_width * session.render_height * 8
-                rendered_bytes = session.output_width * session.output_height * 4
-                slots = max(
-                    1, min(3, _QUEUE_BUDGET_BYTES // max(1, prepared_bytes + rendered_bytes))
-                )
-                prepared: queue.Queue = queue.Queue(maxsize=slots)
-                finished: queue.Queue = queue.Queue(maxsize=slots)
+            prepared_bytes = session.render_width * session.render_height * 8
+            rendered_bytes = session.output_width * session.output_height * 4
+            slots = max(
+                1, min(3, _QUEUE_BUDGET_BYTES // max(1, prepared_bytes + rendered_bytes))
+            )
+            prepared: queue.Queue = queue.Queue(maxsize=slots)
+            finished: queue.Queue = queue.Queue(maxsize=slots)
 
-                def offer(target: queue.Queue, item, interruptible: bool) -> bool:
-                    """Hand an item on, staying responsive to cancellation."""
-                    deadline = time.monotonic() + _STALL_TIMEOUT
-                    while not stop.is_set():
-                        if interruptible:
-                            throw_exception_if_processing_interrupted()
-                        try:
-                            target.put(item, timeout=0.1)
-                            return True
-                        except queue.Full:
-                            if time.monotonic() > deadline:
-                                raise RuntimeError(
-                                    "A pipeline stage stopped consuming frames for "
-                                    f"{_STALL_TIMEOUT:.0f} seconds."
-                                )
-                    return False
-
-                def produce() -> None:
+            def offer(target: queue.Queue, item, interruptible: bool) -> bool:
+                """Hand an item on, staying responsive to cancellation."""
+                deadline = time.monotonic() + _STALL_TIMEOUT
+                while not stop.is_set():
+                    if interruptible:
+                        throw_exception_if_processing_interrupted()
                     try:
-                        guide = TemporalGuide(
-                            session.render_width,
-                            session.render_height,
-                            flow_width=options.flow_width,
-                            scene_change_threshold=options.scene_change_threshold,
-                            enabled=options.wants_motion(frame_count),
-                        )
-                        for index, rgba, pts in decode_frames(
-                            source, metadata["rotation"], limit=frame_count
+                        target.put(item, timeout=0.1)
+                        return True
+                    except queue.Full:
+                        if time.monotonic() > deadline:
+                            raise RuntimeError(
+                                "A pipeline stage stopped consuming frames for "
+                                f"{_STALL_TIMEOUT:.0f} seconds."
+                            ) from None
+                return False
+
+            def produce() -> None:
+                try:
+                    guide = TemporalGuide(
+                        session.render_width,
+                        session.render_height,
+                        flow_width=options.flow_width,
+                        scene_change_threshold=options.scene_change_threshold,
+                        enabled=options.wants_motion(frame_count),
+                    )
+                    for index, rgba, pts in decode_frames(
+                        source, metadata["rotation"], limit=frame_count
+                    ):
+                        if stop.is_set():
+                            return
+                        fitted = fit_frame(rgba, session.render_width, session.render_height)
+                        if not offer(
+                            prepared, (index, fitted, guide.process(fitted), pts), False
                         ):
-                            if stop.is_set():
-                                return
-                            fitted = fit_frame(
-                                rgba, session.render_width, session.render_height
-                            )
-                            if not offer(
-                                prepared, (index, fitted, guide.process(fitted), pts), False
-                            ):
-                                return
-                    except BaseException as exc:  # surfaced on the main thread
-                        errors.put(exc)
-                        stop.set()
-                    finally:
-                        offer(prepared, _STOP, False)
-
-                def consume() -> None:
+                            return
+                except BaseException as exc:  # surfaced on the main thread
+                    errors.put(exc)
+                    stop.set()
+                finally:
                     try:
-                        while True:
-                            try:
-                                item = finished.get(timeout=0.1)
-                            except queue.Empty:
-                                if stop.is_set():
-                                    return
-                                continue
-                            if item is _STOP:
-                                return
-                            encoder.write(*item)
+                        offer(prepared, _STOP, False)
                     except BaseException as exc:
                         errors.put(exc)
                         stop.set()
 
-                producer = threading.Thread(target=produce, name="dlss5-decode", daemon=True)
-                writer = threading.Thread(target=consume, name="dlss5-encode", daemon=True)
-                producer.start()
-                writer.start()
+            def consume() -> None:
+                try:
+                    while True:
+                        try:
+                            item = finished.get(timeout=0.1)
+                        except queue.Empty:
+                            if stop.is_set():
+                                return
+                            continue
+                        if item is _STOP:
+                            return
+                        encoder.write(*item)
+                except BaseException as exc:
+                    errors.put(exc)
+                    stop.set()
 
-                progress = ProgressBar(frame_count)
-                written = 0
-                while True:
-                    throw_exception_if_processing_interrupted()
-                    if not errors.empty():
-                        raise errors.get()
-                    try:
-                        item = prepared.get(timeout=0.1)
-                    except queue.Empty:
-                        continue
-                    if item is _STOP:
-                        break
-                    index, rgba, guide, pts = item
-                    enhanced, out_pts = session.submit(
-                        index=index,
-                        rgba=rgba,
-                        motion=guide.motion,
-                        reset=guide.reset,
-                        pts=pts,
-                    )
-                    if not offer(finished, (enhanced, out_pts), True):
-                        break
-                    written += 1
-                    progress.update(1)
+            producer = threading.Thread(target=produce, name="dlss5-decode", daemon=True)
+            writer = threading.Thread(target=consume, name="dlss5-encode", daemon=True)
+            producer.start()
+            writer.start()
 
-                offer(finished, _STOP, True)
-                writer.join(timeout=_WRITER_TIMEOUT)
-                if writer.is_alive():
-                    raise RuntimeError(
-                        "The encoder did not finish flushing; the output would be "
-                        "truncated."
-                    )
-                producer.join(timeout=30)
+            progress = ProgressBar(frame_count)
+            written = 0
+            while True:
+                throw_exception_if_processing_interrupted()
                 if not errors.empty():
                     raise errors.get()
-                if written != frame_count:
-                    raise RuntimeError(
-                        f"Only {written} of the expected {frame_count} frames were "
-                        f"rendered from {source.name}; the output would be truncated."
-                    )
-                encoder.close()
-            except BaseException:
-                # Join the writer before touching the encoder: while it runs it
-                # owns the PyAV container.
-                stop.set()
-                if writer is not None:
-                    writer.join(timeout=30)
-                if producer is not None:
-                    producer.join(timeout=10)
+                try:
+                    item = prepared.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+                if item is _STOP:
+                    break
+                index, rgba, guide, pts = item
+                enhanced, out_pts = session.submit(
+                    index=index,
+                    rgba=rgba,
+                    motion=guide.motion,
+                    reset=guide.reset,
+                    pts=pts,
+                )
+                if not offer(finished, (enhanced, out_pts), True):
+                    break
+                written += 1
+                progress.update(1)
+
+            offer(finished, _STOP, True)
+            writer.join(timeout=_WRITER_TIMEOUT)
+            if writer.is_alive():
+                raise RuntimeError(
+                    "The encoder did not finish flushing; the output would be truncated."
+                )
+            producer.join(timeout=30)
+            if not errors.empty():
+                raise errors.get()
+            if written == 0:
+                raise RuntimeError(f"No frames were decoded from {source.name}.")
+            if written != frame_count:
+                message = (
+                    f"{source.name}: rendered {written} frames, the probe promised "
+                    f"{frame_count}."
+                )
+                if counted_exactly:
+                    raise RuntimeError(message + " The output would be truncated.")
+                # nb_frames is an estimate in several containers, so a small
+                # disagreement is not worth discarding a finished render for.
+                logger.warning("DLSS5: %s Keeping the render.", message)
+            encoder.close()
+        except BaseException:
+            # Join the writer before touching the encoder: while it runs it owns
+            # the PyAV container.
+            stop.set()
+            try:
+                for thread in (writer, producer):
+                    if thread is not None and thread.ident is not None:
+                        thread.join(timeout=30)
+            finally:
                 if encoder is not None:
                     encoder.abort()
-                raise
+                session.abort()
+            raise
 
-            return written, session
+        try:
+            session.close()
+        except RuntimeError as exc:
+            # Every frame is encoded and muxable at this point, so a messy worker
+            # teardown is reported rather than allowed to discard the render.
+            logger.warning("DLSS5: the worker exited badly after a complete render: %s", exc)
+        return written, session
