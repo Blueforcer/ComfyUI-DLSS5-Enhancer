@@ -113,7 +113,7 @@ class DLSS5SettingsNode(io.ComfyNode):
                     default="M",
                     tooltip=(
                         "Force a specific DLSS model instead of NVIDIA's choice. "
-                        "Measured detail retention: Default and J are the softest, "
+                        "Measured detail retention: Default, J and K are the softest, "
                         "L and M reconstruct markedly more skin and hair texture. "
                         "Set to Default if the worker reports a different applied preset."
                     ),

@@ -87,6 +87,15 @@ def _members(archive: zipfile.ZipFile, marker: str) -> list[zipfile.ZipInfo]:
     ]
 
 
+def _relative_to_marker(name: str, marker: str) -> str:
+    """Split on the marker case insensitively without index arithmetic."""
+    lowered_marker = marker.lower()
+    for index in range(len(name)):
+        if name[index : index + len(marker)].lower() == lowered_marker:
+            return name[index + len(marker) :]
+    return ""
+
+
 def _unsafe(relative: str) -> bool:
     """Reject archive entries that would escape the extraction directory."""
     candidate = Path(relative)
@@ -96,6 +105,21 @@ def _unsafe(relative: str) -> bool:
         or bool(candidate.drive)
         or ".." in candidate.parts
     )
+
+
+def _check_writable(target: Path) -> None:
+    """Refuse to half-overwrite a runtime that another process is using."""
+    for existing in target.glob("*"):
+        if not existing.is_file():
+            continue
+        try:
+            with existing.open("ab"):
+                pass
+        except OSError as exc:
+            raise SystemExit(
+                f"{existing} is in use ({exc}). Close ComfyUI and any running DLSS "
+                "worker before reinstalling the runtime."
+            )
 
 
 def _extract(archive_path: Path) -> None:
@@ -109,20 +133,25 @@ def _extract(archive_path: Path) -> None:
             if not members:
                 raise RuntimeError(f"The archive contains no {marker} entries.")
             target.mkdir(parents=True, exist_ok=True)
+            _check_writable(target)
             print(f"Extracting {len(members)} files to {target}")
             resolved_target = target.resolve()
+            skipped = []
             for info in members:
                 name = info.filename.replace("\\", "/")
-                lowered = name.lower()
-                relative = name[lowered.index(marker) + len(marker):]
+                relative = _relative_to_marker(name, marker)
                 if not relative or _unsafe(relative):
+                    skipped.append(info.filename)
                     continue
                 destination = (target / relative).resolve()
                 if not destination.is_relative_to(resolved_target):
+                    skipped.append(info.filename)
                     continue
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 with archive.open(info) as source, destination.open("wb") as sink:
                     shutil.copyfileobj(source, sink)
+            for name in skipped:
+                print(f"Skipped unsafe archive entry: {name}")
 
 
 def _confirm(auto_yes: bool) -> None:
@@ -167,6 +196,10 @@ def main() -> None:
         _register(arguments.runtime_dir.expanduser().resolve())
         return
 
+    if not arguments.url.lower().startswith("https://"):
+        raise SystemExit(
+            f"Refusing to download {arguments.url}: only https URLs are accepted."
+        )
     _confirm(arguments.yes)
     with tempfile.TemporaryDirectory(prefix="dlss5-") as workspace:
         archive = _download(arguments.url, Path(workspace) / "release.zip")
@@ -175,6 +208,14 @@ def main() -> None:
             shutil.copy2(archive, PACKAGE_ROOT / archive.name)
 
     layout = RuntimeLayout(root=RUNTIME_TARGET).validate()
+    missing = [
+        name for name in ("ffmpeg.exe", "ffprobe.exe") if not (FFMPEG_TARGET / name).is_file()
+    ]
+    if missing:
+        raise SystemExit(
+            f"The archive did not provide {', '.join(missing)} in {FFMPEG_TARGET}. "
+            "The image node works, but the video node needs them."
+        )
     config = write_config(layout.root, FFMPEG_TARGET)
     print(f"Runtime ready in {layout.root}")
     print(f"Wrote {config}")

@@ -44,7 +44,8 @@ of that worker's binary protocol:
 ```
 
 Encoded video carries no motion vectors, so they are estimated per frame with dense optical flow
-(OpenCV DIS) at the render resolution, including automatic history resets on scene cuts.
+(OpenCV DIS) and supplied at the render resolution, including automatic history resets on
+scene cuts.
 Everything else is handled here: session setup, dimension negotiation, frame ordering,
 cancellation and diagnostics.
 
@@ -56,7 +57,7 @@ this repository and are not redistributed by it. See
 
 | Item | Requirement |
 | --- | --- |
-| OS | Windows 11 64-bit with DirectX 12 |
+| OS | Windows 11 64-bit with DirectX 12. Windows 10 is untested |
 | GPU | NVIDIA RTX 40 or 50 series. RTX 20 and older are refused. RTX 30 is refused unless the installed add-on and neural runtime match one specific verified pair by SHA-256; see [Troubleshooting](#troubleshooting) |
 | Driver | Current NVIDIA GeForce driver |
 | ComfyUI | A build with the V3 node API (`comfy_api.latest`) |
@@ -68,6 +69,8 @@ All commands below are run from the ComfyUI portable root, the folder containing
 `python_embeded` and `ComfyUI`.
 
 ### 1. Install the node pack
+
+In ComfyUI-Manager, search for "DLSS5" and install it there. Or clone it by hand:
 
 ```bat
 git clone https://github.com/Blueforcer/ComfyUI-DLSS5-Enhancer.git ComfyUI\custom_nodes\ComfyUI-DLSS5-Enhancer
@@ -134,9 +137,9 @@ Collects the neural rendering controls once and feeds both processing nodes.
 | `nr_intensity` | 0.00 to 2.00 (1.00) | Strength of the neural pass. Values above 1.00 have no further effect on current builds; below 1.00 blends back towards the source |
 | `local_tone_strength` | 0.00 to 2.00 (1.00) | Local tone mapping |
 | `local_structure_strength` | 0.00 to 2.00 (1.50) | Local detail and structure reconstruction |
-| `skin_structure_strength` | -1.00 to 2.00 (2.00) | Skin and pore reconstruction. Only active while `automatic_mask` is on, which is what locates the skin |
+| `skin_structure_strength` | -1.00 to 2.00 (2.00) | Skin and pore reconstruction. Only active while `automatic_mask` is on, which is what locates the skin. `-1` leaves the decision to the model |
 | `automatic_mask` | off, on (on) | Let the model detect the regions it treats as skin. Also the gate for `skin_structure_strength` |
-| `dlss_model_preset` | Default, J, K, L, M (M) | Forces a specific model. Default, J and K are the softest; L and M reconstruct markedly more skin and hair texture |
+| `dlss_model_preset` | Default, J, K, L, M (M) | Forces a specific model. Default, J and K are the softest; L and M reconstruct markedly more skin and hair texture. If the worker reports it applied a different preset, set this back to Default |
 | `motion` | auto, optical_flow, none (auto) | Motion vectors for temporal accumulation. `auto` skips them for single images |
 | `scene_change_threshold` | 0.01 to 1.00 (0.24) | Mean luminance change above which temporal history resets |
 | `warmup_frames` | 0 to 16 (0) | Extra frames the worker renders before the first output settles |
@@ -173,7 +176,7 @@ with MP4 and MOV, audio is re-encoded to AAC 192 kbit/s and subtitle tracks are 
 | `filename_prefix` | DLSS5 | A timestamp is appended, existing files are never overwritten. Path separators are rejected |
 | `output_directory` | empty | Empty writes to the ComfyUI output directory; a relative path is resolved inside it |
 | `max_frames` | 0 | 0 renders everything, any other value renders a preview |
-| `copy_audio` | on | Mux the source audio and chapters into the result; subtitles only with MKV |
+| `copy_audio` | on | Mux the source audio into the result; subtitles only with MKV. Chapters and metadata are carried over either way |
 | `verify_neural_rendering` | on (advanced) | Check the ReShade log after the render. The file is written either way |
 
 Outputs: the written path (`STRING`) and the number of rendered frames (`INT`).
@@ -289,13 +292,19 @@ One measurement, RTX 5090 with driver 610.74, 640x360 to 1280x720 at 2x Performa
 
 ## Known limitations
 
-- HDR sources are tone mapped to 8-bit SDR. The neural renderer works on SDR, and the encoder
-  writes `yuv420p`. The video node logs a warning when it detects an HDR transfer function.
+- HDR sources are converted to 8-bit SDR without a tone-mapping operator, so highlights clip
+  and the grade shifts. Convert HDR footage to SDR yourself first for a predictable result.
+  The encoder writes `yuv420p`, or `yuv422p10le` for ProRes Proxy. The video node logs a
+  warning when it detects an HDR transfer function.
 - Sources without a frame count in their metadata, common for MKV, WebM and variable frame rate
   files, trigger a full counting pass with ffprobe before rendering starts. The node logs a line
   before doing so, but the queue looks idle while it runs.
 - Only one worker runs at a time per render. Two DLSS nodes executing in parallel will compete
   for the GPU.
+- `motion = none` sends zero motion and resets the temporal history once, which assumes the
+  batch is one coherent sequence. For a batch of unrelated images, run them separately.
+- Running the video node twice with identical inputs replays the cached result and writes no
+  new file. Change an input, or the source file, to render again.
 - Windows only. The worker, the carrier and the add-on are Windows binaries.
 
 ## Troubleshooting
