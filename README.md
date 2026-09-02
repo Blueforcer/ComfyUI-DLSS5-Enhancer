@@ -64,7 +64,6 @@ this repository and are not redistributed by it. See
 
 | Item | Requirement |
 | --- | --- |
-| OS | Windows 11 64-bit with DirectX 12. Windows 10 is untested |
 | GPU | NVIDIA ships DLSS 5 for the RTX 50 series. Through this community runtime it also runs on RTX 40. RTX 20 and older are refused, and RTX 30 is refused unless the installed add-on and neural runtime match one specific verified pair by SHA-256; see [Troubleshooting](#troubleshooting) |
 | Driver | Current NVIDIA GeForce driver |
 | ComfyUI | A build with the V3 node API (`comfy_api.latest`) |
