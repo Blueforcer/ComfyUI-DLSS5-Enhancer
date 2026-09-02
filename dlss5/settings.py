@@ -79,6 +79,7 @@ def _even(value: float) -> int:
 
 def resolve_output_size(width: int, height: int, factor: float) -> tuple[int, int]:
     """Scale the source size to the DLSS output size, staying inside 8K limits."""
+    factor, _ = resolve_upscaling(factor)
     output_width = _even(int(width) * factor)
     output_height = _even(int(height) * factor)
     if max(output_width, output_height) > MAX_LONG_EDGE or min(output_width, output_height) > MAX_SHORT_EDGE:
@@ -107,10 +108,10 @@ class DlssOptions:
     upscaling_factor: float = 1.0
     nr_preset: str = "Default"
     nr_style: str = "Default"
-    dlss_model_preset: str = "Default"
+    dlss_model_preset: str = "M"
     nr_intensity: float = 1.0
     local_tone_strength: float = 1.0
-    local_structure_strength: float = 1.0
+    local_structure_strength: float = 1.5
     skin_structure_strength: float = -1.0
     automatic_mask: bool = False
     warmup_frames: int = 0
@@ -152,8 +153,18 @@ class DlssOptions:
                 f"Unknown motion mode {motion!r}. Choose one of: {', '.join(MOTION_MODES)}."
             )
 
+        threshold = values.get("scene_change_threshold")
+        if threshold is not None and not 0.01 <= float(threshold) <= 1.0:
+            # At 0.0 every frame counts as a scene change, which silently
+            # disables temporal accumulation.
+            raise ValueError("scene change threshold must be between 0.01 and 1.0.")
+
+        warmup = values.get("warmup_frames")
+        if warmup is not None and not 0 <= int(warmup) <= 64:
+            raise ValueError("warmup frames must be between 0 and 64.")
+
         options = cls(**values)
-        resolve_upscaling(options.upscaling_factor)
+        object.__setattr__(options, "upscaling_factor", resolve_upscaling(options.upscaling_factor)[0])
         return options
 
     @property

@@ -45,7 +45,10 @@ class DLSS5SettingsNode(io.ComfyNode):
                     "nr_preset",
                     options=list(NR_PRESETS),
                     default="Default",
-                    tooltip="Neural rendering preset selected inside the DLSS model.",
+                    tooltip=(
+                        "Neural rendering preset inside the DLSS model. Measured to "
+                        "have no effect on current runtime builds."
+                    ),
                 ),
                 io.Combo.Input(
                     "nr_style",
@@ -59,7 +62,11 @@ class DLSS5SettingsNode(io.ComfyNode):
                     min=0.0,
                     max=2.0,
                     step=0.01,
-                    tooltip="Overall strength of the neural rendering pass.",
+                    tooltip=(
+                        "Overall strength of the neural rendering pass. Measured on "
+                        "current runtime builds, values above 1.0 have no further "
+                        "effect; use below 1.0 to blend back towards the source."
+                    ),
                 ),
                 io.Float.Input(
                     "local_tone_strength",
@@ -71,11 +78,14 @@ class DLSS5SettingsNode(io.ComfyNode):
                 ),
                 io.Float.Input(
                     "local_structure_strength",
-                    default=1.0,
+                    default=1.5,
                     min=0.0,
                     max=2.0,
                     step=0.01,
-                    tooltip="Local detail and structure reconstruction strength.",
+                    tooltip=(
+                        "Local detail and structure reconstruction. Higher keeps more "
+                        "texture; 1.5 is a good balance for AI generated footage."
+                    ),
                 ),
                 io.Float.Input(
                     "skin_structure_strength",
@@ -83,7 +93,10 @@ class DLSS5SettingsNode(io.ComfyNode):
                     min=-1.0,
                     max=2.0,
                     step=0.01,
-                    tooltip="Skin detail strength. -1 keeps the model's own behaviour.",
+                    tooltip=(
+                        "Skin detail strength. -1 keeps the model's own behaviour. "
+                        "Measured to have no effect on current runtime builds."
+                    ),
                 ),
                 io.Boolean.Input(
                     "automatic_mask",
@@ -93,9 +106,13 @@ class DLSS5SettingsNode(io.ComfyNode):
                 io.Combo.Input(
                     "dlss_model_preset",
                     options=list(DLSS_MODEL_PRESETS),
-                    default="Default",
-                    tooltip="Force a specific DLSS model (J/K/L/M) instead of NVIDIA's choice.",
-                    advanced=True,
+                    default="M",
+                    tooltip=(
+                        "Force a specific DLSS model instead of NVIDIA's choice. M "
+                        "keeps noticeably more texture than the default model on AI "
+                        "generated footage. Set to Default if the worker reports that "
+                        "it applied a different preset."
+                    ),
                 ),
                 io.Combo.Input(
                     "motion",
@@ -110,7 +127,7 @@ class DLSS5SettingsNode(io.ComfyNode):
                 io.Float.Input(
                     "scene_change_threshold",
                     default=0.24,
-                    min=0.0,
+                    min=0.01,
                     max=1.0,
                     step=0.01,
                     tooltip="Mean luminance change above which temporal history is reset.",
