@@ -2,10 +2,11 @@
 
 Run NVIDIA DLSS 5 Neural Rendering over your frames and videos, inside ComfyUI.
 
-DLSS 5 is NVIDIA's neural rendering pass. It reconstructs the lighting and material detail that
-real-time rendering has to leave out: skin subsurface scattering, light transmission through hair,
-contact shadows. This node pack drives that same renderer over video frames and image batches,
-with optional 1.5x to 3x upscaling.
+DLSS 5 is NVIDIA's neural rendering pass. In a game it reconstructs the material and lighting
+detail that real-time rendering has to leave out, such as skin subsurface scattering, light
+transmission through hair and contact shadows, guided by the engine's own buffers. This node pack
+drives that same renderer over video frames and image batches, with optional 1.5x to 3x upscaling.
+Without those buffers what it recovers here is material response: skin, hair and fabric structure.
 
 It is not a filter that imitates the look. Frames go to the native renderer and come back
 reconstructed.
@@ -120,7 +121,8 @@ The runtime location is resolved like this:
 2. otherwise, in order: the `DLSS5_RUNTIME_DIR` environment variable, `config.json` written by
    `install_runtime.py`, and the bundled `runtime/` folder inside the node pack
 
-ffmpeg and ffprobe are resolved separately and only when the video node runs: the
+ffmpeg and ffprobe are resolved separately and only when the video node runs, before the render
+starts, so a missing binary fails immediately rather than after the job: the
 `DLSS5_FFMPEG_DIR` environment variable, the `ffmpeg_dir` key in `config.json`, the bundled
 `ffmpeg/bin` folder, an `ffmpeg/bin` folder next to the runtime, and finally `PATH`.
 
@@ -133,11 +135,13 @@ load normally and only fail when executed, with a message that says how to insta
 
 ### DLSS5 Settings
 
-Collects the neural rendering controls once and feeds both processing nodes. Most of them are the
-controls NVIDIA exposes to game developers: `local_structure_strength` and `local_tone_strength`
-are the Structure and Tone intensities, `automatic_mask` is the semantic masking that tells the
-model which regions are skin, and `dlss_model_preset` selects between models trained with
-different weights.
+Collects the neural rendering controls once and feeds both processing nodes. Several map onto the
+controls NVIDIA documents for game developers: `local_structure_strength` and
+`local_tone_strength` are the Structure and Tone intensities, `automatic_mask` is the semantic
+masking that tells the model which regions are skin, `skin_structure_strength` is the strength
+applied inside that mask, and `dlss_model_preset` selects between models trained with different
+weights. The rest are add-on level controls, and some are inert on current runtime builds, which
+the table notes.
 
 | Widget | Options or range (default) | Effect |
 | --- | --- | --- |
@@ -174,8 +178,8 @@ signed feature-18 execution.
 
 File in, file out. Decoding, neural rendering and encoding run concurrently through bounded
 queues, so a long video never enters the workflow as one large batch. Original timestamps,
-chapters and metadata are preserved. With MKV, audio and subtitles are stream copied unchanged;
-with MP4 and MOV, audio is re-encoded to AAC 192 kbit/s and subtitle tracks are dropped.
+chapters and metadata are preserved. With `copy_audio` on, MKV stream copies audio and subtitles
+unchanged, while MP4 and MOV re-encode audio to AAC 192 kbit/s and drop subtitle tracks.
 
 | Input | Default | Notes |
 | --- | --- | --- |
@@ -183,9 +187,9 @@ with MP4 and MOV, audio is re-encoded to AAC 192 kbit/s and subtitle tracks are 
 | `codec` | HEVC | H.264 and HEVC use NVENC with a libx264/libx265 software fallback. AV1 needs NVENC and has no fallback. ProRes Proxy encodes in software |
 | `container` | MKV | MP4, MKV, MOV. ProRes requires MOV or MKV |
 | `quality` | Auto | Auto derives a bitrate from resolution and frame rate, Good doubles it, Best quadruples it, Max encodes at constant quality. Ignored for ProRes Proxy |
-| `filename_prefix` | DLSS5 | A timestamp is appended, existing files are never overwritten. Path separators are rejected |
-| `output_directory` | empty | Empty writes to the ComfyUI output directory; a relative path is resolved inside it |
-| `max_frames` | 0 | 0 renders everything, any other value renders a preview |
+| `filename_prefix` | DLSS5 | A timestamp is appended, existing files are never overwritten. Path separators, drive letters, control characters and a leading dash are rejected |
+| `output_directory` | empty | Empty writes to the ComfyUI output directory. A relative path is resolved inside it and may not escape it; an absolute path is used as given |
+| `max_frames` | 0 | 0 renders everything, any other value renders a preview of that many frames, up to 1000000 |
 | `copy_audio` | on | Mux the source audio into the result; subtitles only with MKV. Chapters and metadata are carried over either way |
 | `verify_neural_rendering` | on (advanced) | Check the ReShade log after the render. The file is written either way |
 
@@ -201,8 +205,8 @@ indicator.
 What that showed on the current runtime build:
 
 - The model reconstructs materials rather than sharpening edges. Overall detail energy drops,
-  because generator noise disappears, while skin, hair and fabric gain structure that was not
-  in the source.
+  because generator noise disappears, while skin, hair and fabric gain structure the source only
+  implied.
 - `dlss_model_preset` matters most. Default, J and K land around 0.56x source detail energy;
   L reaches 0.70x and M 0.73x, which is visible as pores, brow lines and separated beard hair
   instead of waxy skin. M is the default.
@@ -242,7 +246,7 @@ Enhance a clip inside a workflow, so the frames stay available for compositing. 
   DLSS5 Settings ----+
 ```
 
-Enhance a long file, holding nothing in memory and keeping the audio:
+Enhance a long file, holding only a few frames in memory and keeping the audio:
 
 ```
   DLSS5 Settings --> DLSS5 Enhance Video File --> output path
@@ -258,7 +262,10 @@ execution cannot be proven. This matters, because a silent fallback to plain ups
 indistinguishable from success in the output itself. The check is controlled by
 `verify_neural_rendering` and runs once the worker has exited, since ReShade rewrites its log on
 start and flushes it on exit. The video node writes and muxes its file before verifying, so a
-failed check never discards a finished render.
+failed check never discards a finished render. The same applies to the worker itself: if it exits
+badly after every frame was rendered, the node logs a warning and keeps the file. The one case
+that reports a failure on an otherwise good render is a worker that has to be killed on a close
+timeout, because it never flushes its log.
 
 Two log observations are normal and not errors:
 
@@ -292,10 +299,13 @@ and `--runtime-dir`.
   output batch up front at the upscaled resolution. Peak memory is roughly the input batch plus
   the batch times the squared upscaling factor. For long videos use DLSS5 Enhance Video File,
   which never materialises the clip.
-- Optical flow is computed at a reduced width of 640 pixels and scaled up, which keeps the guide
-  cost small next to the neural pass. Set `motion = none` for unrelated stills.
+- Optical flow is computed at a width of at most 640 pixels and scaled up, which keeps the guide
+  cost small next to the neural pass. `motion = none` skips it, which suits a static camera, but
+  it is not a way to process unrelated images together; see
+  [Known limitations](#known-limitations).
 - The output long edge is capped at 7680 pixels and the short edge at 4320, in either
-  orientation. The node names a usable mode when a request exceeds that.
+  orientation. The node names a usable mode when a request exceeds that, or says so when even 1x
+  does not fit.
 
 One measurement, RTX 5090 with driver 610.74, 640x360 to 1280x720 at 2x Performance: about
 4 seconds of worker startup, then roughly 10 frames per second.
@@ -313,6 +323,9 @@ One measurement, RTX 5090 with driver 610.74, 640x360 to 1280x720 at 2x Performa
   for the GPU.
 - `motion = none` sends zero motion and resets the temporal history once, which assumes the
   batch is one coherent sequence. For a batch of unrelated images, run them separately.
+- `nb_frames` is an estimate in several containers. When the rendered frame count disagrees with
+  a count taken from metadata, the node warns and keeps the render; only a count from the exact
+  ffprobe counting pass is treated as authoritative and fails the run.
 - Running the video node twice with identical inputs replays the cached result and writes no
   new file. Change an input, or the source file, to render again.
 - Windows only. The worker, the carrier and the add-on are Windows binaries.
@@ -323,9 +336,12 @@ One measurement, RTX 5090 with driver 610.74, 640x360 to 1280x720 at 2x Performa
 | --- | --- |
 | `No DLSS 5 runtime was found` | Runtime not installed or the path is wrong. Run `install_runtime.py` or set `DLSS5_RUNTIME_DIR` |
 | `The DLSS 5 runtime in ... is incomplete` | Files were deleted or extracted partially. The message lists what is missing |
-| `could not be started` | Antivirus is blocking the worker, or the file is not executable. Add the runtime folder to the exclusion list |
+| `The native DLSS worker at ... could not be started` | Antivirus is blocking the worker, or the file is not executable. Add the runtime folder to the exclusion list |
 | `nvidia-smi is unavailable` | The NVIDIA driver tools are not on `PATH`, or no NVIDIA GPU is present |
-| `is outside the supported RTX 30/40/50 scope` | RTX 20 or older, or a card whose name the detector cannot classify |
+| `is outside the supported RTX 30/40/50 scope` | An RTX card older than the 30 series |
+| `No supported NVIDIA RTX GPU was detected` | nvidia-smi ran but reported no card with RTX in its name |
+| `OpenCV is required` | Install `opencv-python`, or `opencv-contrib-python` if you already use it |
+| `The PyAV package is required` | Only the video node needs it: `python_embeded\python.exe -m pip install av` |
 | `needs the tested experimental Ampere pair` | RTX 30 only runs with the verified RenoDX 4.70 and DLSS NR 310.8.SF-v2 files, checked by SHA-256. The message prints the hashes actually installed |
 | `does not speak the version-4 protocol` | The registered runtime is from a different release. Use v3.0 |
 | `ffmpeg/ffprobe were not found` | Only the video node needs them. Set `DLSS5_FFMPEG_DIR` or put them on `PATH` |
@@ -350,8 +366,11 @@ ComfyUI-DLSS5-Enhancer/
     diagnostics.py       GPU checks, feature 18 proof, failure analysis
     imaging.py           IMAGE tensor and RGBA8 conversion, letterboxing
     media.py             Probing, decoding, NVENC encoding, muxing
-    selftest.py
+    selftest.py          The smoke test itself
   nodes/                 The three ComfyUI nodes
+  config.json            Written by install_runtime.py, not tracked
+  runtime/               Native runtime, not tracked
+  ffmpeg/                Bundled ffmpeg, not tracked
 ```
 
 To uninstall, delete the node folder. The runtime, `config.json` and any bundled ffmpeg live
