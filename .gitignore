@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+
+# Runtime binaries and local setup: never committed, see install_runtime.py
+config.json
+runtime/
+ffmpeg/
+*.zip
+
+# Local artefacts
+*.log
+outputs/

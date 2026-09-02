@@ -1,0 +1,18 @@
+[project]
+name = "comfyui-dlss5-enhancer"
+description = "NVIDIA DLSS 5 Neural Rendering (NGX feature 18) for ComfyUI. Enhances image batches and video files with the native neural renderer, with optional upscaling."
+version = "1.0.0"
+license = { file = "LICENSE" }
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["numpy", "opencv-python", "av"]
+keywords = ["comfyui", "dlss", "nvidia", "neural-rendering", "upscaling", "video"]
+
+[project.urls]
+Repository = "https://github.com/Blueforcer/ComfyUI-DLSS5-Enhancer"
+Issues = "https://github.com/Blueforcer/ComfyUI-DLSS5-Enhancer/issues"
+
+[tool.comfy]
+PublisherId = "blueforcer"
+DisplayName = "ComfyUI DLSS5 Enhancer"
+Repository = "https://github.com/Blueforcer/ComfyUI-DLSS5-Enhancer"
