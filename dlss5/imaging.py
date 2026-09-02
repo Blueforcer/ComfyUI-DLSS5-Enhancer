@@ -15,7 +15,7 @@ def require_cv2() -> None:
     if cv2 is None:
         raise RuntimeError(
             "OpenCV is required for frame scaling and motion estimation. "
-            "Install it with: python -m pip install opencv-python"
+            "Install opencv-python, or opencv-contrib-python if you already use it."
         )
 
 

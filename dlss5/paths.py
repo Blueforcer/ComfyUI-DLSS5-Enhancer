@@ -51,7 +51,8 @@ class RuntimeLayout:
     """
 
     root: Path
-    config: dict = field(default_factory=dict)
+    # Excluded from equality so the layout stays hashable and comparable.
+    config: dict = field(default_factory=dict, compare=False, repr=False)
 
     @property
     def ffmpeg(self) -> Path:
@@ -76,6 +77,11 @@ class RuntimeLayout:
     @property
     def reshade_log(self) -> Path:
         return self.root / "ReShade.log"
+
+    def require_ffmpeg(self) -> "RuntimeLayout":
+        """Resolve ffmpeg now, so a missing binary fails before a long render."""
+        _resolve_ffmpeg(self.config, self.root)
+        return self
 
     def validate(self) -> "RuntimeLayout":
         missing = [

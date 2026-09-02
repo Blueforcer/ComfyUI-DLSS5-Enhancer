@@ -19,7 +19,15 @@ from .diagnostics import (
     verify_feature_18,
 )
 from .paths import RuntimeLayout
-from .settings import DlssOptions, resolve_output_size
+from .settings import DLSS_MODEL_PRESETS, DlssOptions, resolve_output_size
+
+
+def _preset_name(value: int) -> str:
+    """Name a model preset the way the widget spells it."""
+    for name, number in DLSS_MODEL_PRESETS.items():
+        if number == value:
+            return f"{name} ({value})"
+    return str(value)
 
 
 class DlssSession:
@@ -49,6 +57,7 @@ class DlssSession:
         )
 
         self._logs = LogRing()
+        self._log_thread: threading.Thread | None = None
         self._closed = False
         self._frames_submitted = 0
         # Filesystem timestamps can lag slightly behind the clock.
@@ -108,7 +117,7 @@ class DlssSession:
                 code = self._worker.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 code = None
-            self._log_thread.join(timeout=2)
+            self._join_log_thread()
             details = "\n".join(self.worker_logs[-60:]) or "The worker produced no output."
             raise RuntimeError(
                 "The native worker failed during DLSS setup or does not speak the "
@@ -134,9 +143,10 @@ class DlssSession:
         requested_preset = int(native["dlss_model_preset"])
         if setup.applied_model_preset != requested_preset:
             raise RuntimeError(
-                f"The worker applied DLSS model preset {setup.applied_model_preset} "
-                f"instead of the requested {requested_preset}. This runtime does not "
-                "support that model. Set dlss_model_preset to Default."
+                "The worker applied DLSS model preset "
+                f"{_preset_name(setup.applied_model_preset)} instead of the requested "
+                f"{self.options.dlss_model_preset}. This runtime does not support that "
+                "model. Set dlss_model_preset to Default."
             )
         if setup.render_width < 64 or setup.render_height < 64:
             raise RuntimeError(
@@ -199,7 +209,7 @@ class DlssSession:
             exit_code = self._worker.wait(timeout=10)
         except subprocess.TimeoutExpired:
             exit_code = None
-        self._log_thread.join(timeout=2)
+        self._join_log_thread()
         raise RuntimeError(
             describe_worker_failure(
                 exit_code=exit_code,
@@ -276,12 +286,16 @@ class DlssSession:
             ) from exc
         self._closed = True
         self._close_pipes()
-        self._log_thread.join(timeout=2)
+        self._join_log_thread()
         if exit_code:
             raise RuntimeError(
                 f"The native DLSS worker exited with code {exit_code}:\n"
                 + "\n".join(self.worker_logs[-40:])
             )
+
+    def _join_log_thread(self, timeout: float = 2.0) -> None:
+        if self._log_thread is not None and self._log_thread.ident is not None:
+            self._log_thread.join(timeout=timeout)
 
     def _close_pipes(self) -> None:
         for pipe in (self._worker.stdin, self._worker.stdout):
@@ -306,7 +320,7 @@ class DlssSession:
                 except OSError:
                     pass
         self._close_pipes()
-        self._log_thread.join(timeout=2)
+        self._join_log_thread()
 
     def __enter__(self) -> "DlssSession":
         return self

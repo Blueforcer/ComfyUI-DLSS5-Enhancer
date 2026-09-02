@@ -45,6 +45,10 @@ MOTION_MODES = ["auto", "optical_flow", "none"]
 MAX_LONG_EDGE = 7680
 MAX_SHORT_EDGE = 4320
 
+MAX_WARMUP_FRAMES = 16
+MIN_FLOW_WIDTH = 64
+MAX_FLOW_WIDTH = 4096
+
 _CONTROL_RANGES = {
     "nr_intensity": (0.0, 2.0),
     "local_tone_strength": (0.0, 2.0),
@@ -154,17 +158,37 @@ class DlssOptions:
             )
 
         threshold = values.get("scene_change_threshold")
-        if threshold is not None and not 0.01 <= float(threshold) <= 1.0:
+        if threshold is not None:
             # At 0.0 every frame counts as a scene change, which silently
             # disables temporal accumulation.
-            raise ValueError("scene change threshold must be between 0.01 and 1.0.")
+            threshold = float(threshold)
+            if not 0.01 <= threshold <= 1.0:
+                raise ValueError("scene change threshold must be between 0.01 and 1.0.")
+            values["scene_change_threshold"] = threshold
 
         warmup = values.get("warmup_frames")
-        if warmup is not None and not 0 <= int(warmup) <= 64:
-            raise ValueError("warmup frames must be between 0 and 64.")
+        if warmup is not None:
+            warmup = int(warmup)
+            if not 0 <= warmup <= MAX_WARMUP_FRAMES:
+                raise ValueError(f"warmup frames must be between 0 and {MAX_WARMUP_FRAMES}.")
+            values["warmup_frames"] = warmup
+
+        flow_width = values.get("flow_width")
+        if flow_width is not None:
+            flow_width = int(flow_width)
+            if not MIN_FLOW_WIDTH <= flow_width <= MAX_FLOW_WIDTH:
+                raise ValueError(
+                    f"flow width must be between {MIN_FLOW_WIDTH} and {MAX_FLOW_WIDTH}."
+                )
+            values["flow_width"] = flow_width
+
+        mask = values.get("automatic_mask")
+        if mask is not None and not isinstance(mask, bool):
+            raise ValueError("automatic mask must be a boolean.")
 
         options = cls(**values)
-        object.__setattr__(options, "upscaling_factor", resolve_upscaling(options.upscaling_factor)[0])
+        # Raises for anything that is not one of the supported DLSS factors.
+        resolve_upscaling(options.upscaling_factor)
         return options
 
     @property

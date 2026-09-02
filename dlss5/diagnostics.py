@@ -73,16 +73,19 @@ class LogRing:
                 self.important.append(text)
 
     def snapshot(self) -> list[str]:
+        """Pinned setup lines first, then the tail.
+
+        Callers slice the tail, so the pinned lines have to come first or a long
+        render would push the actual failure out of view.
+        """
         with self._lock:
-            merged = list(self.lines)
+            tail = list(self.lines)
             important = list(self.important)
             dropped = self.dropped
-        for line in important:
-            if line not in merged:
-                merged.append(line)
+        prefix = [line for line in important if line not in tail]
         if dropped:
-            merged.append(f"[{dropped} earlier worker log lines dropped]")
-        return merged
+            prefix.append(f"[{dropped} earlier worker log lines dropped]")
+        return prefix + tail
 
 
 def drain(stream: BinaryIO, ring: LogRing) -> None:
@@ -108,7 +111,13 @@ def detect_gpu() -> dict[str, Any]:
         "--format=csv,noheader,nounits",
     ]
     try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=15)
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise RuntimeError(
             "nvidia-smi is unavailable; DLSS 5 needs an NVIDIA RTX GPU with a current driver."

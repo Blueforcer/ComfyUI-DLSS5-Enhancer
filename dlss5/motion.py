@@ -11,18 +11,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-try:
-    import cv2
-except ImportError:  # reported when a node runs, not by hiding every node
-    cv2 = None
-
-
-def require_cv2() -> None:
-    if cv2 is None:
-        raise RuntimeError(
-            "OpenCV is required for frame scaling and motion estimation. "
-            "Install it with: python -m pip install opencv-python"
-        )
+from .imaging import cv2, require_cv2
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +41,7 @@ class TemporalGuide:
         self.scene_change_threshold = scene_change_threshold
         self.zero_motion = np.zeros((height, width, 2), dtype=np.float16)
         self._previous_gray: np.ndarray | None = None
+        self._seen_first = False
 
         scale = min(1.0, flow_width / max(1, width))
         self.flow_width = max(64, int(round(width * scale / 2) * 2))
@@ -77,9 +67,10 @@ class TemporalGuide:
         """Return the guide for ``rgba``; the first frame always resets history."""
         if not self.enabled:
             # Zero motion, but reset only once: resetting every frame would throw
-            # away the temporal history the neural pass builds up.
-            first = self._previous_gray is None
-            self._previous_gray = self.zero_motion
+            # away the temporal history the neural pass builds up. This assumes a
+            # coherent sequence, which is what motion="none" is for.
+            first = not self._seen_first
+            self._seen_first = True
             return Guide(motion=self.zero_motion, reset=first, scene_score=0.0)
 
         current = self._downscaled_gray(rgba)
