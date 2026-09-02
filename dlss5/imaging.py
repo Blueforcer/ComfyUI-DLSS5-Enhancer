@@ -2,13 +2,26 @@
 
 from __future__ import annotations
 
-import cv2
 import numpy as np
 import torch
+
+try:
+    import cv2
+except ImportError:  # reported when a node runs, not by hiding every node
+    cv2 = None
+
+
+def require_cv2() -> None:
+    if cv2 is None:
+        raise RuntimeError(
+            "OpenCV is required for frame scaling and motion estimation. "
+            "Install it with: python -m pip install opencv-python"
+        )
 
 
 def fit_frame(rgba: np.ndarray, width: int, height: int) -> np.ndarray:
     """Letterbox an RGBA frame into ``width`` x ``height`` without distortion."""
+    require_cv2()
     source_height, source_width = rgba.shape[:2]
     if (source_width, source_height) == (width, height):
         return np.ascontiguousarray(rgba, dtype=np.uint8)
@@ -20,7 +33,6 @@ def fit_frame(rgba: np.ndarray, width: int, height: int) -> np.ndarray:
     resized = cv2.resize(rgba, (fit_width, fit_height), interpolation=interpolation)
 
     canvas = np.zeros((height, width, 4), dtype=np.uint8)
-    canvas[..., 3] = 255
     left = (width - fit_width) // 2
     top = (height - fit_height) // 2
     canvas[top : top + fit_height, left : left + fit_width] = resized
@@ -54,6 +66,7 @@ def rgba_to_tensor(rgba: np.ndarray, *, keep_alpha: bool) -> torch.Tensor:
 
 def resize_alpha(alpha: np.ndarray, width: int, height: int) -> np.ndarray:
     """Scale a source alpha plane onto the DLSS output grid."""
+    require_cv2()
     if alpha.shape[:2] == (height, width):
         return alpha
     return cv2.resize(alpha, (width, height), interpolation=cv2.INTER_LINEAR)

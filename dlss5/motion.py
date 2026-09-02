@@ -9,8 +9,20 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import cv2
 import numpy as np
+
+try:
+    import cv2
+except ImportError:  # reported when a node runs, not by hiding every node
+    cv2 = None
+
+
+def require_cv2() -> None:
+    if cv2 is None:
+        raise RuntimeError(
+            "OpenCV is required for frame scaling and motion estimation. "
+            "Install it with: python -m pip install opencv-python"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,11 +59,13 @@ class TemporalGuide:
 
         self._flow = None
         if enabled:
+            require_cv2()
             self._flow = cv2.DISOpticalFlow_create(cv2.DISOPTICAL_FLOW_PRESET_MEDIUM)
             self._flow.setUseSpatialPropagation(True)
             self._flow.setFinestScale(1)
 
     def _downscaled_gray(self, rgba: np.ndarray) -> np.ndarray:
+        require_cv2()
         gray = cv2.cvtColor(rgba, cv2.COLOR_RGBA2GRAY)
         return cv2.resize(
             gray,
@@ -62,7 +76,11 @@ class TemporalGuide:
     def process(self, rgba: np.ndarray) -> Guide:
         """Return the guide for ``rgba``; the first frame always resets history."""
         if not self.enabled:
-            return Guide(motion=self.zero_motion, reset=True, scene_score=1.0)
+            # Zero motion, but reset only once: resetting every frame would throw
+            # away the temporal history the neural pass builds up.
+            first = self._previous_gray is None
+            self._previous_gray = self.zero_motion
+            return Guide(motion=self.zero_motion, reset=first, scene_score=0.0)
 
         current = self._downscaled_gray(rgba)
         if self._previous_gray is None:

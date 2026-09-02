@@ -82,8 +82,8 @@ def main() -> int:
                 f"frame {index:3d}    : {output.shape[1]}x{output.shape[0]} "
                 f"pts={pts} reset={motion.reset} mean={float(output[..., :3].mean()):.2f}"
             )
-        report = session.feature_report()
-
+    # Readable only after the worker exited, which is when ReShade flushes its log.
+    report = session.feature_report()
     print(f"feature 18   : verified, native fallback={report['native_fallback']}")
     for line in report["evidence"]:
         print(f"  {line}")

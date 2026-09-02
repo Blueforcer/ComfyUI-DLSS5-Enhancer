@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
@@ -44,11 +44,22 @@ class RuntimeMissing(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class RuntimeLayout:
-    """Resolved locations of every binary a render session needs."""
+    """Resolved locations of every binary a render session needs.
+
+    ffmpeg is resolved on first use: the image node never needs it, and failing
+    its lookup there would block a perfectly usable install.
+    """
 
     root: Path
-    ffmpeg: Path
-    ffprobe: Path
+    config: dict = field(default_factory=dict)
+
+    @property
+    def ffmpeg(self) -> Path:
+        return _resolve_ffmpeg(self.config, self.root)[0]
+
+    @property
+    def ffprobe(self) -> Path:
+        return _resolve_ffmpeg(self.config, self.root)[1]
 
     @property
     def worker(self) -> Path:
@@ -152,8 +163,7 @@ def find_runtime(override: str | os.PathLike[str] | None = None) -> RuntimeLayou
     for candidate in candidates:
         root = candidate.expanduser()
         if (root / WORKER_NAME).is_file():
-            ffmpeg, ffprobe = _resolve_ffmpeg(config, root)
-            return RuntimeLayout(root=root.resolve(), ffmpeg=ffmpeg, ffprobe=ffprobe).validate()
+            return RuntimeLayout(root=root.resolve(), config=config).validate()
 
     searched = "\n  ".join(str(path) for path in candidates)
     raise RuntimeMissing(

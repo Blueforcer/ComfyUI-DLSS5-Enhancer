@@ -31,8 +31,11 @@ class DLSS5EnhanceImages(io.ComfyNode):
             ),
             search_aliases=["dlss", "dlss5", "neural rendering", "enhance", "upscale"],
             inputs=[
-                io.Image.Input("images"),
-                DLSS5_SETTINGS.Input("settings"),
+                io.Image.Input(
+                    "images",
+                    tooltip="Frames in playback order; the batch order is the temporal order.",
+                ),
+                DLSS5_SETTINGS.Input("settings", tooltip="Connect a DLSS5 Settings node."),
                 io.Boolean.Input(
                     "verify_neural_rendering",
                     default=True,
@@ -57,6 +60,8 @@ class DLSS5EnhanceImages(io.ComfyNode):
         options = settings.options
 
         count, height, width, channels = images.shape
+        if count == 0:
+            raise ValueError("The image batch is empty.")
         keep_alpha = channels == 4
 
         with DlssSession(
@@ -103,6 +108,6 @@ class DLSS5EnhanceImages(io.ComfyNode):
                 progress.update(1)
 
         # ReShade writes its log out as the worker exits, so the proof of
-        # feature-18 execution is only readable once the session is closed.
+        # feature-18 execution is only readable once the session has closed.
         confirm_feature_18(session, verify_neural_rendering)
         return io.NodeOutput(result)
