@@ -47,7 +47,7 @@ class DLSS5SettingsNode(io.ComfyNode):
                     default="Default",
                     tooltip=(
                         "Neural rendering preset inside the DLSS model. Measured to "
-                        "have no effect on current runtime builds."
+                        "produce identical output at every value on current builds."
                     ),
                 ),
                 io.Combo.Input(
@@ -89,29 +89,33 @@ class DLSS5SettingsNode(io.ComfyNode):
                 ),
                 io.Float.Input(
                     "skin_structure_strength",
-                    default=-1.0,
+                    default=2.0,
                     min=-1.0,
                     max=2.0,
                     step=0.01,
                     tooltip=(
-                        "Skin detail strength. -1 keeps the model's own behaviour. "
-                        "Measured to have no effect on current runtime builds."
+                        "Skin and pore reconstruction. Requires automatic_mask, which "
+                        "is what tells the model where skin is; with the mask off this "
+                        "control does nothing. -1 leaves it to the model."
                     ),
                 ),
                 io.Boolean.Input(
                     "automatic_mask",
-                    default=False,
-                    tooltip="Let the model mask regions it should not alter.",
+                    default=True,
+                    tooltip=(
+                        "Let the model detect the regions it treats as skin. Also the "
+                        "gate for skin_structure_strength."
+                    ),
                 ),
                 io.Combo.Input(
                     "dlss_model_preset",
                     options=list(DLSS_MODEL_PRESETS),
                     default="M",
                     tooltip=(
-                        "Force a specific DLSS model instead of NVIDIA's choice. M "
-                        "keeps noticeably more texture than the default model on AI "
-                        "generated footage. Set to Default if the worker reports that "
-                        "it applied a different preset."
+                        "Force a specific DLSS model instead of NVIDIA's choice. "
+                        "Measured detail retention: Default and J are the softest, "
+                        "L and M reconstruct markedly more skin and hair texture. "
+                        "Set to Default if the worker reports a different applied preset."
                     ),
                 ),
                 io.Combo.Input(

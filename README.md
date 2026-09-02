@@ -134,9 +134,9 @@ Collects the neural rendering controls once and feeds both processing nodes.
 | `nr_intensity` | 0.00 to 2.00 (1.00) | Strength of the neural pass. Values above 1.00 have no further effect on current builds; below 1.00 blends back towards the source |
 | `local_tone_strength` | 0.00 to 2.00 (1.00) | Local tone mapping |
 | `local_structure_strength` | 0.00 to 2.00 (1.50) | Local detail and structure reconstruction |
-| `skin_structure_strength` | -1.00 to 2.00 (-1.00) | Skin detail. Measured to have no effect on current runtime builds |
-| `automatic_mask` | off, on (off) | Let the model mask regions it should not alter |
-| `dlss_model_preset` | Default, J, K, L, M (M) | Forces a specific model. M preserves noticeably more texture than the default model |
+| `skin_structure_strength` | -1.00 to 2.00 (2.00) | Skin and pore reconstruction. Only active while `automatic_mask` is on, which is what locates the skin |
+| `automatic_mask` | off, on (on) | Let the model detect the regions it treats as skin. Also the gate for `skin_structure_strength` |
+| `dlss_model_preset` | Default, J, K, L, M (M) | Forces a specific model. Default, J and K are the softest; L and M reconstruct markedly more skin and hair texture |
 | `motion` | auto, optical_flow, none (auto) | Motion vectors for temporal accumulation. `auto` skips them for single images |
 | `scene_change_threshold` | 0.01 to 1.00 (0.24) | Mean luminance change above which temporal history resets |
 | `warmup_frames` | 0 to 16 (0) | Extra frames the worker renders before the first output settles |
@@ -187,27 +187,35 @@ ringing indicator).
 
 What that showed on the current runtime build:
 
-- The neural pass is a reconstruction, not a sharpener. Detail energy drops to roughly half of the
-  source while high frequency energy stays below the source level, so it removes generator noise
-  rather than adding edges.
+- The model reconstructs materials rather than sharpening edges. Overall detail energy drops,
+  because generator noise disappears, while skin, hair and fabric gain structure that was not
+  in the source.
+- `dlss_model_preset` matters most. Default, J and K land around 0.56x source detail energy;
+  L reaches 0.70x and M 0.73x, which is visible as pores, brow lines and separated beard hair
+  instead of waxy skin. M is the default.
+- `skin_structure_strength` only works while `automatic_mask` is on. With the mask off, every
+  value produces bit identical output; with it on, 2.0 adds a further measurable step of skin
+  detail. Both are on by default.
 - `nr_intensity` is clamped at 1.0. Values of 1.0, 1.5 and 2.0 produce bit identical output;
-  0.0 and 0.5 are progressively closer to the source.
-- `nr_preset` and `skin_structure_strength` produce bit identical output at every value.
-- `dlss_model_preset = M` is a genuinely different model: detail energy 0.71x of the source rather
-  than 0.55x, which shows up as visibly more skin, hair and fabric texture. This is the default.
-- `local_structure_strength` and `local_tone_strength` both work across their full range.
-- `nr_style = Cinematic` deepens shadows and shifts the grade; `Natural` softens. Both change the
+  0.0 and 0.5 blend progressively back towards the source.
+- `nr_preset` produces bit identical output at every value.
+- `local_structure_strength` and `local_tone_strength` work across their full range.
+- `nr_style = Cinematic` deepens shadows and shifts the grade, `Natural` softens. Both change the
   look rather than the amount of reconstruction.
 
 Starting points:
 
 | Goal | Settings |
 | --- | --- |
-| Clean up generated video, same resolution | Defaults: 1x DLAA, model M, structure 1.5 |
+| Clean up generated video, same resolution | Defaults: 1x DLAA, model M, mask on, skin 2.0, structure 1.5 |
 | Clean up and upscale | Same, with `upscaling_mode = 2x (Performance)` |
-| Maximum texture | `local_structure_strength 2.0`, `local_tone_strength 1.3` |
+| Most realistic faces | Defaults plus `local_structure_strength 2.0` |
 | More contrast and punch | `nr_style = Cinematic`, but check the shadows |
-| Too strong | `nr_intensity 0.6` to `0.7` |
+| Too strong | `nr_intensity 0.6` to `0.7`, or `local_structure_strength 1.0` |
+
+The neural pass works on what is in the frame. It reconstructs skin and material response, it
+does not restore a face that the source no longer contains. For heavily degraded footage, run a
+generative restoration pass first and use this node as the final cleanup.
 
 ## Example workflows
 

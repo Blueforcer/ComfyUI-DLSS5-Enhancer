@@ -112,8 +112,8 @@ class DlssOptions:
     nr_intensity: float = 1.0
     local_tone_strength: float = 1.0
     local_structure_strength: float = 1.5
-    skin_structure_strength: float = -1.0
-    automatic_mask: bool = False
+    skin_structure_strength: float = 2.0
+    automatic_mask: bool = True
     warmup_frames: int = 0
     motion_mode: str = "auto"
     scene_change_threshold: float = 0.24
