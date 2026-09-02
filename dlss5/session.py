@@ -5,7 +5,7 @@ from __future__ import annotations
 import subprocess
 import threading
 import time
-from typing import Any
+from typing import Any, NoReturn
 
 import numpy as np
 
@@ -54,23 +54,30 @@ class DlssSession:
         # Filesystem timestamps can lag slightly behind the clock.
         self._started_at = time.time() - 1.0
 
-        self._worker = subprocess.Popen(
-            [str(layout.worker), "--video"],
-            cwd=str(layout.root),
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-        self._log_thread = threading.Thread(
-            target=drain,
-            args=(self._worker.stderr, self._logs),
-            name="dlss5-worker-log",
-            daemon=True,
-        )
-        self._log_thread.start()
+        try:
+            self._worker = subprocess.Popen(
+                [str(layout.worker), "--video"],
+                cwd=str(layout.root),
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except OSError as exc:
+            raise RuntimeError(
+                f"The native DLSS worker at {layout.worker} could not be started: {exc}. "
+                "It is an executable despite the .dll name, so antivirus software often "
+                "quarantines or blocks it. Add the runtime folder to the exclusion list."
+            ) from exc
 
         try:
+            self._log_thread = threading.Thread(
+                target=drain,
+                args=(self._worker.stderr, self._logs),
+                name="dlss5-worker-log",
+                daemon=True,
+            )
+            self._log_thread.start()
             self.setup = self._handshake(frame_count)
         except BaseException:
             self.abort()
@@ -90,15 +97,17 @@ class DlssSession:
             perf_quality=int(self.options.mode["perf_quality"]),
             native=native,
         )
-        self._worker.stdin.write(header)
-        self._worker.stdin.flush()
-
         try:
+            self._worker.stdin.write(header)
+            self._worker.stdin.flush()
             payload = protocol.read_exact(
                 self._worker.stdout, protocol.SETUP_RESPONSE.size
             )
-        except EOFError as exc:
-            code = self._worker.wait(timeout=10)
+        except (EOFError, BrokenPipeError, OSError) as exc:
+            try:
+                code = self._worker.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                code = None
             self._log_thread.join(timeout=2)
             details = "\n".join(self.worker_logs[-60:]) or "The worker produced no output."
             raise RuntimeError(
@@ -126,7 +135,8 @@ class DlssSession:
         if setup.applied_model_preset != requested_preset:
             raise RuntimeError(
                 f"The worker applied DLSS model preset {setup.applied_model_preset} "
-                f"instead of the requested {requested_preset}."
+                f"instead of the requested {requested_preset}. This runtime does not "
+                "support that model. Set dlss_model_preset to Default."
             )
         if setup.render_width < 64 or setup.render_height < 64:
             raise RuntimeError(
@@ -183,7 +193,7 @@ class DlssSession:
 
     # -- streaming -----------------------------------------------------------
 
-    def _raise_worker_failure(self, index: int, cause: BaseException) -> None:
+    def _raise_worker_failure(self, index: int, cause: BaseException) -> NoReturn:
         """Turn a dead worker into an actionable error and never return."""
         try:
             exit_code = self._worker.wait(timeout=10)
@@ -222,7 +232,7 @@ class DlssSession:
             header = protocol.ResultHeader.unpack(
                 protocol.read_exact(stdout, protocol.RESULT_HEADER.size)
             )
-        except (EOFError, BrokenPipeError, OSError) as exc:
+        except (EOFError, BrokenPipeError, OSError, RuntimeError) as exc:
             # A dead worker shows up either as a broken stdin pipe or as EOF on
             # stdout; both mean the same thing and deserve the same diagnosis.
             self._raise_worker_failure(index, exc)
@@ -239,7 +249,12 @@ class DlssSession:
             )
 
         output = np.empty((self.output_height, self.output_width, 4), dtype=np.uint8)
-        protocol.read_into(stdout, output)
+        try:
+            protocol.read_into(stdout, output)
+        except (EOFError, OSError) as exc:
+            # A large frame spans many pipe buffers, so this is where a mid frame
+            # crash usually surfaces.
+            self._raise_worker_failure(index, exc)
         self._frames_submitted += 1
         return output, header.pts
 
@@ -249,16 +264,32 @@ class DlssSession:
         """Finish the stream and require a clean worker exit."""
         if self._closed:
             return
-        self._closed = True
         if self._worker.stdin and not self._worker.stdin.closed:
             self._worker.stdin.close()
-        exit_code = self._worker.wait(timeout=60)
+        try:
+            exit_code = self._worker.wait(timeout=60)
+        except subprocess.TimeoutExpired as exc:
+            # _closed stays false here so abort() below can still kill the worker.
+            self.abort()
+            raise RuntimeError(
+                "The native DLSS worker did not exit within 60 seconds and was killed."
+            ) from exc
+        self._closed = True
+        self._close_pipes()
         self._log_thread.join(timeout=2)
         if exit_code:
             raise RuntimeError(
                 f"The native DLSS worker exited with code {exit_code}:\n"
                 + "\n".join(self.worker_logs[-40:])
             )
+
+    def _close_pipes(self) -> None:
+        for pipe in (self._worker.stdin, self._worker.stdout):
+            if pipe is not None and not pipe.closed:
+                try:
+                    pipe.close()
+                except OSError:
+                    pass
 
     def abort(self) -> None:
         """Kill the worker without raising; used on cancellation and errors."""
@@ -274,6 +305,7 @@ class DlssSession:
                     self._worker.kill()
                 except OSError:
                     pass
+        self._close_pipes()
         self._log_thread.join(timeout=2)
 
     def __enter__(self) -> "DlssSession":
@@ -281,6 +313,10 @@ class DlssSession:
 
     def __exit__(self, exc_type, exc, traceback) -> None:
         if exc_type is None:
-            self.close()
+            try:
+                self.close()
+            except BaseException:
+                self.abort()
+                raise
         else:
             self.abort()

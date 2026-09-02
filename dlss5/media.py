@@ -11,10 +11,28 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterator
 
-import av
 import numpy as np
 
 from .paths import RuntimeLayout
+
+try:
+    import av
+except ImportError:  # reported when a node runs, not by hiding every node
+    av = None
+
+# Windows: keep console windows from flashing for every probe and encode.
+NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+PROBE_TIMEOUT = 300
+MUX_TIMEOUT = 3600
+
+
+def require_av() -> None:
+    if av is None:
+        raise RuntimeError(
+            "The PyAV package is required for video decoding and encoding. "
+            "Install it with: python -m pip install av"
+        )
 
 CODECS = ("H.264", "HEVC", "AV1", "ProRes Proxy")
 CONTAINERS = ("MP4", "MKV", "MOV")
@@ -38,13 +56,29 @@ def validate_codec_container(codec: str, container: str) -> None:
         raise ValueError("ProRes Proxy needs the MOV or MKV container.")
 
 
-def _run_json(command: list[str]) -> dict:
-    result = subprocess.run(
-        command, capture_output=True, text=True, encoding="utf-8", errors="replace"
-    )
+def _run_json(command: list[str], timeout: int = PROBE_TIMEOUT) -> dict:
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            creationflags=NO_WINDOW,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"ffprobe did not answer within {timeout} seconds for {command[-1]}."
+        ) from exc
     if result.returncode:
         raise RuntimeError(result.stderr.strip() or "Media probe failed.")
-    return json.loads(result.stdout)
+    try:
+        return json.loads(result.stdout)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"ffprobe returned no usable data for {command[-1]}: {result.stdout[:200]!r}"
+        ) from exc
 
 
 def probe_video(layout: RuntimeLayout, path: Path, *, exact_frames: bool = False) -> dict[str, Any]:
@@ -121,6 +155,7 @@ def rotate_frame(frame: np.ndarray, rotation: int) -> np.ndarray:
 
 def decode_frames(path: Path, rotation: int, limit: int = 0) -> Iterator[tuple[int, np.ndarray, int]]:
     """Yield ``(index, rgba, pts)`` for up to ``limit`` frames (0 = all)."""
+    require_av()
     container = av.open(str(path))
     try:
         stream = container.streams.video[0]
@@ -155,7 +190,19 @@ def resolve_quality(quality: str, codec: str, width: int, height: int, fps: floa
 
 
 @lru_cache(maxsize=64)
+def _encoder_available_cached(ffmpeg: str, encoder: str, width: int, height: int) -> bool:
+    return _probe_encoder(ffmpeg, encoder, width, height)
+
+
 def _encoder_available(ffmpeg: str, encoder: str, width: int, height: int) -> bool:
+    """Cache only successes, so a transient probe failure is not permanent."""
+    if _encoder_available_cached(ffmpeg, encoder, width, height):
+        return True
+    _encoder_available_cached.cache_clear()
+    return _probe_encoder(ffmpeg, encoder, width, height)
+
+
+def _probe_encoder(ffmpeg: str, encoder: str, width: int, height: int) -> bool:
     """Check that this encoder can really take the requested size on this GPU."""
     command = [
         ffmpeg,
@@ -173,10 +220,17 @@ def _encoder_available(ffmpeg: str, encoder: str, width: int, height: int) -> bo
         "null",
         "-",
     ]
-    return (
-        subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode
-        == 0
-    )
+    try:
+        result = subprocess.run(
+            command,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=120,
+            creationflags=NO_WINDOW,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
 
 
 def _codec_arguments(
@@ -253,8 +307,13 @@ class RawFrameEncoder:
             "passthrough",
             str(target),
         ]
+        require_av()
         self.process = subprocess.Popen(
-            command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            creationflags=NO_WINDOW,
         )
         self.logs: list[str] = []
         # PyAV containers are not thread safe: the writer thread and a cancelling
@@ -266,18 +325,32 @@ class RawFrameEncoder:
         )
         self._log_thread.start()
 
-        self._container = av.open(self.process.stdin, mode="w", format="nut")
-        self._stream = self._container.add_stream("rawvideo", rate=rate)
-        self._stream.width = width
-        self._stream.height = height
-        self._stream.pix_fmt = "rgba"
-        self._stream.time_base = time_base
-        self._time_base = time_base
+        try:
+            self._container = av.open(self.process.stdin, mode="w", format="nut")
+            self._stream = self._container.add_stream("rawvideo", rate=rate)
+            self._stream.width = width
+            self._stream.height = height
+            self._stream.pix_fmt = "rgba"
+            self._stream.time_base = time_base
+            self._time_base = time_base
+        except BaseException:
+            # The log thread keeps this object alive, which would keep stdin open
+            # and leave ffmpeg waiting for input forever.
+            self.process.kill()
+            self._log_thread.join(timeout=5)
+            raise
 
     def _drain(self) -> None:
-        for raw in iter(self.process.stderr.readline, b""):
-            self.logs.append(raw.decode("utf-8", errors="replace").rstrip())
-        self.process.stderr.close()
+        try:
+            for raw in iter(self.process.stderr.readline, b""):
+                self.logs.append(raw.decode("utf-8", errors="replace").rstrip())
+        except (OSError, ValueError):
+            pass
+        finally:
+            try:
+                self.process.stderr.close()
+            except OSError:
+                pass
 
     def write(self, rgba: np.ndarray, pts: int) -> None:
         frame = av.VideoFrame.from_ndarray(rgba, format="rgba")
@@ -285,7 +358,7 @@ class RawFrameEncoder:
         frame.time_base = self._time_base
         with self._lock:
             if self._finished:
-                return
+                raise RuntimeError("The encoder is already closed; frame dropped.")
             for packet in self._stream.encode(frame):
                 self._container.mux(packet)
 
@@ -300,21 +373,42 @@ class RawFrameEncoder:
             self._container.close()
         if self.process.stdin and not self.process.stdin.closed:
             self.process.stdin.close()
-        code = self.process.wait(timeout=120)
+        try:
+            code = self.process.wait(timeout=120)
+        except subprocess.TimeoutExpired as exc:
+            self._kill()
+            self._log_thread.join(timeout=5)
+            raise RuntimeError("ffmpeg did not finish within 120 seconds.") from exc
         self._log_thread.join(timeout=5)
         if code:
             raise RuntimeError("ffmpeg encoding failed:\n" + "\n".join(self.logs[-40:]))
 
+    def _kill(self) -> None:
+        if self.process.poll() is None:
+            try:
+                self.process.kill()
+            except OSError:
+                pass
+        # Drop the buffered pipe explicitly, otherwise its finaliser reports a
+        # broken pipe long after the fact.
+        if self.process.stdin is not None and not self.process.stdin.closed:
+            try:
+                self.process.stdin.close()
+            except OSError:
+                pass
+
     def abort(self) -> None:
-        """Tear the encoder down without flushing. Join writer threads first."""
+        """Tear the encoder down without flushing.
+
+        ffmpeg is killed BEFORE the lock is taken: a writer thread blocked in
+        mux() on a full stdin pipe holds that lock, and killing ffmpeg is what
+        releases it. Taking the lock first would deadlock instead.
+        """
+        self._kill()
         with self._lock:
             if self._finished:
                 return
             self._finished = True
-            # Kill ffmpeg before closing the container, so writing the trailer
-            # cannot block on a pipe nobody reads any more.
-            if self.process.poll() is None:
-                self.process.kill()
             try:
                 self._container.close()
             except Exception:
@@ -389,8 +483,19 @@ def mux(
         *streams,
         str(output),
     ]
-    result = subprocess.run(
-        command, capture_output=True, text=True, encoding="utf-8", errors="replace"
-    )
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=MUX_TIMEOUT,
+            creationflags=NO_WINDOW,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"The final mux did not finish within {MUX_TIMEOUT} seconds."
+        ) from exc
     if result.returncode:
         raise RuntimeError("The final audio/metadata mux failed:\n" + result.stderr[-4000:])

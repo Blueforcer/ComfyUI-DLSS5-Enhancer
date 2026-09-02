@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import re
 import subprocess
+import threading
 from collections import deque
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -17,39 +18,70 @@ from .paths import RuntimeLayout
 EXPECTED_AMPERE_ADDON_SHA256 = "D5ADF82EB44B065F4C590AC91FE824BAB07AFEA0EB9F994BDE936710C8593952"
 EXPECTED_AMPERE_NEURAL_SHA256 = "6EB209E764F39872625DEBD6ABAF45E2BB6322F6F270F781F70C059AE30B3927"
 
+# Version tolerant: the runtime version in the first marker changes between
+# DLSS NR builds, and pinning it would reject a working newer runtime.
 FEATURE_18_MARKERS = (
-    "signed DLSSNR 310.8.0 D3D12 runtime initialized",
-    "feature 18 created via the signed snippet",
-    "inline feature 18 evaluation succeeded",
+    ("signed DLSSNR runtime initialized", re.compile(r"signed DLSSNR [\d.]+ D3D12 runtime initialized")),
+    ("feature 18 created", re.compile(r"feature 18 created via the signed snippet")),
+    ("feature 18 evaluated", re.compile(r"inline feature 18 evaluation succeeded")),
 )
 
-_INTERESTING = ("error", "exception", "failed", "dlssnr", "feature 18")
+# Lines worth keeping even when the buffer overflows. The setup evidence is what
+# makes a late crash report actionable, so it is pinned from the start of the run.
+_INTERESTING = (
+    "error",
+    "exception",
+    "failed",
+    "dlssnr",
+    "feature 18",
+    "profile applied",
+    "model preset",
+    "dlss 5 add-on",
+    "carrier ready",
+    "stream source",
+    "optimal settings",
+)
 
 
 @dataclass(slots=True)
 class LogRing:
-    """Bounded log buffer that always keeps the most diagnostic lines."""
+    """Bounded log buffer that keeps the tail plus the earliest diagnostic lines.
+
+    The drain thread writes while the main thread reads, so both sides lock.
+    """
 
     lines: deque[str] = field(default_factory=lambda: deque(maxlen=500))
-    important: deque[str] = field(default_factory=lambda: deque(maxlen=120))
+    important: list[str] = field(default_factory=list)
     dropped: int = 0
+    max_important: int = 120
+    _lock: threading.Lock = field(default_factory=threading.Lock)
 
     def add(self, line: str) -> None:
         text = line.rstrip()
         if not text:
             return
-        if len(self.lines) == self.lines.maxlen:
-            self.dropped += 1
-        self.lines.append(text)
         lowered = text.lower()
-        if any(token in lowered for token in _INTERESTING):
-            self.important.append(text)
+        with self._lock:
+            if len(self.lines) == self.lines.maxlen:
+                self.dropped += 1
+            self.lines.append(text)
+            # Keep the FIRST matching lines: setup evidence beats the tail of a
+            # long render, which the ring already covers.
+            if len(self.important) < self.max_important and any(
+                token in lowered for token in _INTERESTING
+            ):
+                self.important.append(text)
 
     def snapshot(self) -> list[str]:
-        merged = list(self.lines)
-        for line in self.important:
+        with self._lock:
+            merged = list(self.lines)
+            important = list(self.important)
+            dropped = self.dropped
+        for line in important:
             if line not in merged:
                 merged.append(line)
+        if dropped:
+            merged.append(f"[{dropped} earlier worker log lines dropped]")
         return merged
 
 
@@ -157,7 +189,7 @@ def verify_feature_18(reshade_log: str) -> dict[str, Any]:
     Without this check a render can silently complete with plain upscaling, which
     looks like a working node but applies no neural rendering at all.
     """
-    missing = [marker for marker in FEATURE_18_MARKERS if marker not in reshade_log]
+    missing = [name for name, pattern in FEATURE_18_MARKERS if not pattern.search(reshade_log)]
     if missing:
         evidence = "\n".join(relevant_lines(reshade_log, limit=40))
         raise RuntimeError(
