@@ -1,13 +1,14 @@
 # ComfyUI-DLSS5-Enhancer
 
-NVIDIA neural rendering (NGX feature 18) as ComfyUI nodes. Enhance video frames and images with
-the real neural renderer, with optional 1.5x to 3x upscaling.
+Run NVIDIA DLSS 5 Neural Rendering over your frames and videos, inside ComfyUI.
 
-This is not a filter that imitates the look. Frames are streamed to NVIDIA's native neural
-renderer and come back reconstructed.
+DLSS 5 is NVIDIA's neural rendering pass. It reconstructs the lighting and material detail that
+real-time rendering has to leave out: skin subsurface scattering, light transmission through hair,
+contact shadows. This node pack drives that same renderer over video frames and image batches,
+with optional 1.5x to 3x upscaling.
 
-"DLSS 5" is the name the upstream community project uses for this feature-18 path. It is not a
-product name NVIDIA markets, and this project is not affiliated with or endorsed by NVIDIA.
+It is not a filter that imitates the look. Frames go to the native renderer and come back
+reconstructed.
 
 ## Contents
 
@@ -26,9 +27,15 @@ product name NVIDIA markets, and this project is not affiliated with or endorsed
 
 ## How it works
 
-Neural rendering has no Python API. It runs inside a native D3D12 process that hosts ReShade and
-the RenoDX DLSS 5 add-on and evaluates NGX feature 18. This node pack implements the client side
-of that worker's binary protocol:
+In games, DLSS 5 runs as "3D-Guided" Neural Rendering: the engine hands the model its rendered
+frame together with geometry, texture and lighting buffers, and motion vectors. Video has none of
+that. What reaches the model here is the decoded frame plus motion vectors estimated from the
+footage itself, so the guidance is weaker than in a game, and the reconstruction is correspondingly
+more conservative.
+
+There is no Python API for any of it. The renderer lives in a native D3D12 process that hosts
+ReShade and the RenoDX DLSS 5 add-on and evaluates NGX feature 18. This node pack implements the
+client side of that worker's binary protocol:
 
 ```
   ComfyUI node
@@ -44,9 +51,8 @@ of that worker's binary protocol:
 ```
 
 Encoded video carries no motion vectors, so they are estimated per frame with dense optical flow
-(OpenCV DIS) and supplied at the render resolution, including automatic history resets on
-scene cuts.
-Everything else is handled here: session setup, dimension negotiation, frame ordering,
+(OpenCV DIS) and supplied at the render resolution, including automatic history resets on scene
+cuts. Everything else is handled here: session setup, dimension negotiation, frame ordering,
 cancellation and diagnostics.
 
 The neural components themselves are NVIDIA, ReShade and RenoDX binaries. They are not part of
@@ -58,7 +64,7 @@ this repository and are not redistributed by it. See
 | Item | Requirement |
 | --- | --- |
 | OS | Windows 11 64-bit with DirectX 12. Windows 10 is untested |
-| GPU | NVIDIA RTX 40 or 50 series. RTX 20 and older are refused. RTX 30 is refused unless the installed add-on and neural runtime match one specific verified pair by SHA-256; see [Troubleshooting](#troubleshooting) |
+| GPU | NVIDIA ships DLSS 5 for the RTX 50 series. Through this community runtime it also runs on RTX 40. RTX 20 and older are refused, and RTX 30 is refused unless the installed add-on and neural runtime match one specific verified pair by SHA-256; see [Troubleshooting](#troubleshooting) |
 | Driver | Current NVIDIA GeForce driver |
 | ComfyUI | A build with the V3 node API (`comfy_api.latest`) |
 | Python | `numpy`, `av` and OpenCV. ComfyUI portable normally ships all three; `opencv-python` is deliberately not in `requirements.txt` so it cannot overwrite an existing `opencv-contrib-python` |
@@ -127,7 +133,11 @@ load normally and only fail when executed, with a message that says how to insta
 
 ### DLSS5 Settings
 
-Collects the neural rendering controls once and feeds both processing nodes.
+Collects the neural rendering controls once and feeds both processing nodes. Most of them are the
+controls NVIDIA exposes to game developers: `local_structure_strength` and `local_tone_strength`
+are the Structure and Tone intensities, `automatic_mask` is the semantic masking that tells the
+model which regions are skin, and `dlss_model_preset` selects between models trained with
+different weights.
 
 | Widget | Options or range (default) | Effect |
 | --- | --- | --- |
@@ -183,10 +193,10 @@ Outputs: the written path (`STRING`) and the number of rendered frames (`INT`).
 
 ## Recommended settings
 
-The defaults are set from measurements on real AI generated footage, not from taste. The pack was
-run over the same clip with one control changed at a time, comparing the rendered frame against
-the source (mean absolute difference, Laplacian detail energy, and high frequency energy as a
-ringing indicator).
+The defaults come from measurements on real generated footage, not from taste. The same clip was
+run through the pack with one control changed at a time, comparing the rendered frame against the
+source: mean absolute difference, Laplacian detail energy, and high frequency energy as a ringing
+indicator.
 
 What that showed on the current runtime build:
 
@@ -359,5 +369,6 @@ components you are authorised to use, from sources their licences permit. Nothin
 hosted or redistributed here.
 
 The worker protocol was reimplemented for this pack. The runtime and the original application come
-from [Merserk/dlss5-visual-enhancer](https://github.com/Merserk/dlss5-visual-enhancer). This
-project is not affiliated with or endorsed by NVIDIA, ReShade, RenoDX or that project.
+from [Merserk/dlss5-visual-enhancer](https://github.com/Merserk/dlss5-visual-enhancer), which
+makes NVIDIA's renderer usable outside a game engine. This project is not affiliated with or
+endorsed by NVIDIA, ReShade, RenoDX or that project.
