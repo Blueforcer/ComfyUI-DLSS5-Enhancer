@@ -5,8 +5,18 @@ __pycache__/
 config.json
 runtime/
 ffmpeg/
+
+# Belt and braces: no native binary or archive belongs in this repository
+*.dll
+*.exe
+*.addon64
+*.pyd
+*.so
 *.zip
 
 # Local artefacts
 *.log
 outputs/
+.venv/
+.vscode/
+.idea/

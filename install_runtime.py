@@ -41,7 +41,8 @@ NOTICE = """
 This downloads the DLSS 5 Visual Enhancer release (about 467 MB) and extracts
 only its runtime components:
 
-  nvngx.dll             standalone D3D12 worker (an executable, not NVIDIA's NGX core)
+  nvngx.dll             standalone D3D12 worker built by the upstream project, under
+                        its own terms (an executable, not NVIDIA's NGX core)
   nvngx_dlss.dll        DLSS Super Resolution runtime      - NVIDIA proprietary terms
   nvngx_dlssnr.dll      DLSS Neural Rendering runtime      - NVIDIA proprietary terms
   dxgi.dll              ReShade carrier                    - BSD-3-Clause
@@ -71,6 +72,10 @@ def _download(url: str, target: Path) -> Path:
             else:
                 print(f"\r  {received / 1e6:8.1f} MB", end="")
     print()
+    if total and received != total:
+        raise RuntimeError(
+            f"The download stopped after {received} of {total} bytes. Run the script again."
+        )
     return target
 
 
@@ -80,6 +85,17 @@ def _members(archive: zipfile.ZipFile, marker: str) -> list[zipfile.ZipInfo]:
         for info in archive.infolist()
         if not info.is_dir() and marker in info.filename.replace("\\", "/").lower()
     ]
+
+
+def _unsafe(relative: str) -> bool:
+    """Reject archive entries that would escape the extraction directory."""
+    candidate = Path(relative)
+    return (
+        relative.startswith(("/", "\\"))
+        or candidate.is_absolute()
+        or bool(candidate.drive)
+        or ".." in candidate.parts
+    )
 
 
 def _extract(archive_path: Path) -> None:
@@ -94,19 +110,22 @@ def _extract(archive_path: Path) -> None:
                 raise RuntimeError(f"The archive contains no {marker} entries.")
             target.mkdir(parents=True, exist_ok=True)
             print(f"Extracting {len(members)} files to {target}")
+            resolved_target = target.resolve()
             for info in members:
                 name = info.filename.replace("\\", "/")
-                relative = name.split(marker, 1)[1]
-                if not relative or relative.startswith("/") or ".." in relative.split("/"):
+                lowered = name.lower()
+                relative = name[lowered.index(marker) + len(marker):]
+                if not relative or _unsafe(relative):
                     continue
-                destination = target / relative
+                destination = (target / relative).resolve()
+                if not destination.is_relative_to(resolved_target):
+                    continue
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 with archive.open(info) as source, destination.open("wb") as sink:
                     shutil.copyfileobj(source, sink)
 
 
 def _confirm(auto_yes: bool) -> None:
-    print(NOTICE)
     if auto_yes:
         return
     answer = input("Continue? [y/N] ").strip().lower()
@@ -121,6 +140,11 @@ def _register(runtime_dir: Path) -> None:
             f"{runtime_dir} is not a DLSS 5 runtime directory. Missing: {', '.join(missing)}"
         )
     ffmpeg_dir = runtime_dir.parent / "ffmpeg" / "bin"
+    if not ffmpeg_dir.is_dir():
+        print(
+            "Warning: no ffmpeg found next to the runtime. The image node works, but "
+            "the video node needs ffmpeg on PATH or in DLSS5_FFMPEG_DIR."
+        )
     config = write_config(runtime_dir, ffmpeg_dir if ffmpeg_dir.is_dir() else None)
     print(f"Registered {runtime_dir}")
     print(f"Wrote {config}")
@@ -138,6 +162,7 @@ def main() -> None:
     parser.add_argument("--keep-archive", action="store_true", help="Keep the downloaded zip.")
     arguments = parser.parse_args()
 
+    print(NOTICE)
     if arguments.runtime_dir:
         _register(arguments.runtime_dir.expanduser().resolve())
         return
@@ -149,11 +174,7 @@ def main() -> None:
         if arguments.keep_archive:
             shutil.copy2(archive, PACKAGE_ROOT / archive.name)
 
-    layout = RuntimeLayout(
-        root=RUNTIME_TARGET,
-        ffmpeg=FFMPEG_TARGET / "ffmpeg.exe",
-        ffprobe=FFMPEG_TARGET / "ffprobe.exe",
-    ).validate()
+    layout = RuntimeLayout(root=RUNTIME_TARGET).validate()
     config = write_config(layout.root, FFMPEG_TARGET)
     print(f"Runtime ready in {layout.root}")
     print(f"Wrote {config}")

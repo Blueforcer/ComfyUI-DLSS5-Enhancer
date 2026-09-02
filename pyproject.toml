@@ -5,8 +5,9 @@ version = "1.0.0"
 license = { file = "LICENSE" }
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = ["numpy", "opencv-python", "av"]
+dependencies = ["numpy", "av"]
 keywords = ["comfyui", "dlss", "nvidia", "neural-rendering", "upscaling", "video"]
+authors = [{ name = "Blueforcer" }]
 
 [project.urls]
 Repository = "https://github.com/Blueforcer/ComfyUI-DLSS5-Enhancer"
@@ -16,3 +17,4 @@ Issues = "https://github.com/Blueforcer/ComfyUI-DLSS5-Enhancer/issues"
 PublisherId = "blueforcer"
 DisplayName = "ComfyUI DLSS5 Enhancer"
 Repository = "https://github.com/Blueforcer/ComfyUI-DLSS5-Enhancer"
+supported_os = ["windows"]
