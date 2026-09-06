@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -64,7 +65,13 @@ class RuntimeLayout:
 
     @property
     def worker(self) -> Path:
+        if sys.platform == "linux":
+            return self.root / "linux" / "dlss5-worker.exe"
         return self.root / WORKER_NAME
+
+    @property
+    def wine_prefix(self) -> Path:
+        return Path(self.config.get("wine_prefix", self.root / "wineprefix")).expanduser().resolve()
 
     @property
     def addon(self) -> Path:
@@ -84,18 +91,25 @@ class RuntimeLayout:
         return self
 
     def validate(self) -> "RuntimeLayout":
+        required = REQUIRED_RUNTIME_FILES
+        if sys.platform == "linux":
+            required = ("linux/dlss5-worker.exe", "caller/nvngx.dll_comfy.dll",
+                        "_nvngx.dll", "nvngx_dlss.dll", "nvngx_dlssnr.dll")
         missing = [
             str(self.root / name)
-            for name in REQUIRED_RUNTIME_FILES
+            for name in required
             if not (self.root / name).is_file()
         ]
         if missing:
+            hint = SETUP_HINT
+            if sys.platform == "linux":
+                hint = "Build the Linux worker with bash native/build_linux.sh and supply the NGX runtime. See native/README.md."
             raise RuntimeMissing(
                 "The DLSS 5 runtime in "
                 f"{self.root} is incomplete. Missing:\n  "
                 + "\n  ".join(missing)
                 + "\n\n"
-                + SETUP_HINT
+                + hint
             )
         return self
 
@@ -147,8 +161,9 @@ def _ffmpeg_candidates(config: dict, runtime_root: Path) -> list[Path]:
 
 def _resolve_ffmpeg(config: dict, runtime_root: Path) -> tuple[Path, Path]:
     for directory in _ffmpeg_candidates(config, runtime_root):
-        ffmpeg = directory / "ffmpeg.exe"
-        ffprobe = directory / "ffprobe.exe"
+        suffix = ".exe" if sys.platform == "win32" else ""
+        ffmpeg = directory / f"ffmpeg{suffix}"
+        ffprobe = directory / f"ffprobe{suffix}"
         if ffmpeg.is_file() and ffprobe.is_file():
             return ffmpeg, ffprobe
     on_path = shutil.which("ffmpeg"), shutil.which("ffprobe")
@@ -168,7 +183,7 @@ def find_runtime(override: str | os.PathLike[str] | None = None) -> RuntimeLayou
 
     for candidate in candidates:
         root = candidate.expanduser()
-        if (root / WORKER_NAME).is_file():
+        if (root / WORKER_NAME).is_file() or (root / "linux" / "dlss5-worker.exe").is_file():
             return RuntimeLayout(root=root.resolve(), config=config).validate()
 
     searched = "\n  ".join(str(path) for path in candidates)

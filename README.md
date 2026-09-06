@@ -16,6 +16,7 @@ reconstructed.
 - [How it works](#how-it-works)
 - [Requirements](#requirements)
 - [Installation](#installation)
+- [Linux / Wine setup](#experimental-linux-backend)
 - [Nodes](#nodes)
 - [Recommended settings](#recommended-settings)
 - [Example workflows](#example-workflows)
@@ -69,12 +70,194 @@ this repository and are not redistributed by it. See
 | ComfyUI | A build with the V3 node API (`comfy_api.latest`) |
 | Python | `numpy`, `av` and OpenCV. ComfyUI portable normally ships all three; `opencv-python` is deliberately not in `requirements.txt` so it cannot overwrite an existing `opencv-contrib-python` |
 
+GPU detection uses the CUDA compute capability reported by `nvidia-smi`:
+8.6 for Ampere, 8.9 for Ada, and 12.0 for RTX Blackwell. This also recognizes
+workstation names such as RTX A6000, RTX 6000 Ada, and RTX PRO 6000 Blackwell
+without treating their model numbers as GeForce generations. See
+[NVIDIA's compute capability table](https://developer.nvidia.com/cuda/gpus).
+Passing detection does not establish that a particular GPU/runtime combination
+has been render-tested; the runtime compatibility checks still apply.
+
 ## Installation
+
+### Experimental Linux backend
+
+This checkout includes a direct NGX worker for Linux/Wine. ComfyUI and FFmpeg
+run natively on Linux; the worker uses Wine, VKD3D-Proton, DXVK-NVAPI and
+NVIDIA's Windows NGX libraries. It avoids the ReShade wrapper used on Windows.
+The node names, image/video inputs, temporal guides and version-4 frame protocol
+are preserved. Output is not expected to be pixel-identical to the ReShade backend.
+
+The following setup was tested on an Arch-based Linux installation with an RTX
+5090, NVIDIA driver **610.57.04**, system Wine **11.17**, and the graphics DLLs
+from **Proton CachyOS 11.0-20260521 (SLR, x86_64)**. These are tested versions,
+not established minimum requirements; other combinations need verification.
+The Wine prefix and proprietary runtime are local files, outside Git.
+
+Run the steps below in the same Bash terminal, as your normal user. Activate
+the **same Conda environment or venv used to launch ComfyUI** first.
+
+#### 1. Install host tools and the node pack
+
+Provide Wine (`wine`, `wineboot`, `wineserver`), the MinGW-w64 C++ cross-compiler
+(`x86_64-w64-mingw32-g++`), native Linux FFmpeg/FFprobe, and a working NVIDIA
+driver with Vulkan support. On Arch-based distributions, the tools can be
+installed with:
+
+```bash
+sudo pacman -S --needed wine mingw-w64-gcc ffmpeg vulkan-tools git
+```
+
+On other distributions, install the equivalent packages. Confirm that
+`nvidia-smi` and `vulkaninfo --summary` detect your NVIDIA GPU before continuing.
+
+Clone this fork into your actual ComfyUI installation, replacing the example
+path. If it is already installed, enter its directory instead of cloning again.
+
+```bash
+cd /path/to/ComfyUI/custom_nodes
+git clone https://github.com/ethanfel/ComfyUI-DLSS5-Enhancer.git
+cd ComfyUI-DLSS5-Enhancer
+python -m pip install -r requirements.txt
+python -c "import cv2; print(cv2.__version__)"
+```
+
+If importing `cv2` fails, install `opencv-python` in that environment. Keep an
+existing `opencv-contrib-python` installation if present.
+
+#### 2. Download the DLSS runtime and build the worker
+
+```bash
+python install_runtime.py --yes
+bash native/build_linux.sh
+dlss_root="$(pwd -P)"
+dlss_prefix="$dlss_root/runtime/wineprefix"
+```
+
+The installer downloads the third-party DLSS 5 Visual Enhancer v3.0 runtime
+(about 467 MB); see [Licensing and attribution](#licensing-and-attribution).
+The build produces `runtime/linux/dlss5-worker.exe` and
+`runtime/caller/nvngx.dll_comfy.dll`.
+
+#### 3. Create a dedicated 64-bit Wine prefix
+
+Use the same system Wine installation for both prefix creation and rendering.
+Keep this prefix dedicated to DLSS; the commands below install its graphics DLLs.
+
+```bash
+WINEPREFIX="$dlss_prefix" WINEARCH=win64 \
+  WINEDLLOVERRIDES="winemenubuilder,mscoree,mshtml=d" wineboot -u
+WINEPREFIX="$dlss_prefix" wineserver -w
+test -f "$dlss_prefix/system.reg"
+test "$(readlink "$dlss_prefix/dosdevices/z:")" = /
+dlss_system32="$dlss_prefix/drive_c/windows/system32"
+```
+
+Keep Wine's default `Z:` mapping to `/`: the worker uses it to locate the
+runtime by its absolute Linux path. The Mono and Gecko components are not
+needed by this worker.
+
+#### 4. Install VKD3D-Proton, DXVK, DXVK-NVAPI, and driver DLLs
+
+Download and extract the **SLR x86_64 binary archive** from the tested
+[Proton CachyOS release](https://github.com/CachyOS/proton-cachyos/releases/tag/cachyos-11.0-20260521-slr),
+named `proton-cachyos-11.0-20260521-slr-x86_64.tar.xz`, or use an existing
+installation of that build. Set `dlss_proton` to the extracted directory
+containing `files/`. Steam does not need to be running; this setup
+copies four DLLs from the Proton distribution and launches the worker with
+system Wine.
+
+```bash
+dlss_proton="/path/to/proton-cachyos-11.0-20260521-slr-x86_64"
+dlss_proton_wine="$dlss_proton/files/lib/wine"
+
+install -m 644 "$dlss_proton_wine/vkd3d-proton/x86_64-windows/d3d12.dll" "$dlss_system32/"
+install -m 644 "$dlss_proton_wine/vkd3d-proton/x86_64-windows/d3d12core.dll" "$dlss_system32/"
+install -m 644 "$dlss_proton_wine/dxvk/x86_64-windows/dxgi.dll" "$dlss_system32/"
+install -m 644 "$dlss_proton_wine/nvapi/x86_64-windows/nvapi64.dll" "$dlss_system32/"
+
+# This directory comes from the installed NVIDIA Linux driver.
+dlss_ngx_dir="/usr/lib/nvidia/wine"
+install -m 644 "$dlss_ngx_dir/_nvngx.dll" "$dlss_system32/"
+install -m 644 "$dlss_ngx_dir/nvngx.dll" "$dlss_system32/"
+install -m 644 "$dlss_ngx_dir/_nvngx.dll" "$dlss_root/runtime/"
+```
+
+The driver DLL directory varies by distribution; `/lib64/nvidia/wine` is
+another location. Locate both files in your NVIDIA driver package if the path
+above is absent. Use the files matching the installed driver and refresh these
+copies after a driver update. The `system32` placement follows the
+[DXVK-NVAPI setup instructions](https://github.com/jp7677/dxvk-nvapi/wiki/Tips-and-tricks-for-usage-with-DXVK-NVAPI#dlss-sr-2x).
+
+Use the **64-bit** DLLs. Leave the downloaded runtime's `nvngx.dll` and
+`dxgi.dll` in place: they belong to the Windows/ReShade backend. The Linux
+worker lives in `runtime/linux/` and uses the prefix's graphics DLLs.
+
+#### 5. Save the local configuration
+
+Run this from the node-pack directory in the activated ComfyUI Python
+environment. It preserves existing configuration keys and writes absolute paths.
+
+```bash
+python - "$dlss_root" "$dlss_prefix" <<'PY'
+import json
+import shutil
+import sys
+from pathlib import Path
+
+root, prefix = map(Path, sys.argv[1:])
+path = root / "config.json"
+config = json.loads(path.read_text()) if path.exists() else {}
+wine, ffmpeg, ffprobe = (shutil.which(name) for name in ("wine", "ffmpeg", "ffprobe"))
+assert wine and ffmpeg and ffprobe, "Put Wine and native FFmpeg/FFprobe on PATH first"
+config.update(runtime_dir=str(root / "runtime"), wine_prefix=str(prefix),
+              wine_executable=wine, ffmpeg_dir=str(Path(ffmpeg).parent))
+path.write_text(json.dumps(config, indent=2) + "\n")
+print(path.read_text())
+PY
+```
+
+For every render the node sets `WINEPREFIX`, native DLL overrides for
+`d3d12,d3d12core,nvapi64,dxgi,_nvngx`, `DXVK_ENABLE_NVAPI=1`, and
+`DXVK_NVAPI_DRS_NGX_DLSS_NR_OVERRIDE=on`. You do not need to export these in
+your ComfyUI launcher. FFmpeg runs natively on Linux; the bundled `.exe` files
+are for Windows.
+
+#### 6. Verify the installation and restart ComfyUI
+
+```bash
+python selftest.py --frames 3
+DLSS5_RUN_GPU_TESTS=1 python -m unittest discover -s tests -v
+```
+
+The self-test should report `feature 18 : verified` with evidence of signed NR
+initialization, `CreateFeature(18) -> 0x00000001`, and successful evaluation.
+The GPU tests also check image pixels at zero, partial, and full intensity,
+at native resolution and 1.5x. Successful API calls alone do not establish
+correct pixel output.
+
+Restart ComfyUI in the same environment. The nodes appear under
+**image/upscaling**; leave `runtime_dir` empty in the Settings node to use
+`config.json`. Start with `nr_intensity=1.0`; zero preserves the DLAA/SR image.
+
+If setup fails:
+
+- **Prefix not initialized:** check `wine_prefix` and its `system.reg` file.
+- **NGX/D3D12 initialization fails:** check `nvidia-smi`, Vulkan support, and
+  all six prefix DLLs from step 4. Use a consistent Proton build for the four
+  graphics DLLs.
+- **Black output from an older checkout:** update this fork and rerun
+  `bash native/build_linux.sh`. Change a DLSS setting once or restart ComfyUI
+  to discard any cached black result.
+
+For an external runtime directory, see [native/README.md](native/README.md).
+
+### Windows installation
 
 All commands below are run from the ComfyUI portable root, the folder containing
 `python_embeded` and `ComfyUI`.
 
-### 1. Install the node pack
+#### 1. Install the node pack
 
 In ComfyUI-Manager, search for "DLSS5" and install it there. Or clone it by hand:
 
@@ -83,7 +266,7 @@ git clone https://github.com/Blueforcer/ComfyUI-DLSS5-Enhancer.git ComfyUI\custo
 python_embeded\python.exe -m pip install -r ComfyUI\custom_nodes\ComfyUI-DLSS5-Enhancer\requirements.txt
 ```
 
-### 2. Provide the runtime
+#### 2. Provide the runtime
 
 Nothing is downloaded automatically. Run the setup script once:
 
@@ -125,7 +308,7 @@ starts, so a missing binary fails immediately rather than after the job: the
 `DLSS5_FFMPEG_DIR` environment variable, the `ffmpeg_dir` key in `config.json`, the bundled
 `ffmpeg/bin` folder, an `ffmpeg/bin` folder next to the runtime, and finally `PATH`.
 
-### 3. Restart ComfyUI
+#### 3. Restart ComfyUI
 
 The nodes appear under **image/upscaling**. If you restart before installing the runtime, they
 load normally and only fail when executed, with a message that says how to install it.
@@ -327,7 +510,8 @@ One measurement, RTX 5090 with driver 610.74, 640x360 to 1280x720 at 2x Performa
   ffprobe counting pass is treated as authoritative and fails the run.
 - Running the video node twice with identical inputs replays the cached result and writes no
   new file. Change an input, or the source file, to render again.
-- Windows only. The worker, the carrier and the add-on are Windows binaries.
+- The Linux backend is experimental and uses Wine to run the direct NGX worker.
+  GPU/driver/runtime combinations require testing; it is not a native Vulkan DLSS SDK port.
 
 ## Troubleshooting
 
@@ -337,7 +521,7 @@ One measurement, RTX 5090 with driver 610.74, 640x360 to 1280x720 at 2x Performa
 | `The DLSS 5 runtime in ... is incomplete` | Files were deleted or extracted partially. The message lists what is missing |
 | `The native DLSS worker at ... could not be started` | Antivirus is blocking the worker, or the file is not executable. Add the runtime folder to the exclusion list |
 | `nvidia-smi is unavailable` | The NVIDIA driver tools are not on `PATH`, or no NVIDIA GPU is present |
-| `is outside the supported RTX 30/40/50 scope` | An RTX card older than the 30 series |
+| `is outside the supported RTX Ampere/Ada/Blackwell scope` | The reported compute capability is not 8.6, 8.9, or 12.0. Turing RTX cards remain unsupported; if a newer RTX card reports an unknown value, check its driver and `nvidia-smi` output |
 | `No supported NVIDIA RTX GPU was detected` | nvidia-smi ran but reported no card with RTX in its name |
 | `OpenCV is required` | Install `opencv-python`, or `opencv-contrib-python` if you already use it |
 | `The PyAV package is required` | Only the video node needs it: `python_embeded\python.exe -m pip install av` |

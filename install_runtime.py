@@ -207,7 +207,10 @@ def main() -> None:
         if arguments.keep_archive:
             shutil.copy2(archive, PACKAGE_ROOT / archive.name)
 
-    layout = RuntimeLayout(root=RUNTIME_TARGET).validate()
+    layout = RuntimeLayout(root=RUNTIME_TARGET)
+    missing = [name for name in REQUIRED_RUNTIME_FILES if not (layout.root / name).is_file()]
+    if missing:
+        raise SystemExit(f"The archive did not provide runtime files: {', '.join(missing)}")
     missing = [
         name for name in ("ffmpeg.exe", "ffprobe.exe") if not (FFMPEG_TARGET / name).is_file()
     ]
@@ -216,10 +219,13 @@ def main() -> None:
             f"The archive did not provide {', '.join(missing)} in {FFMPEG_TARGET}. "
             "The image node works, but the video node needs them."
         )
-    config = write_config(layout.root, FFMPEG_TARGET)
+    config = write_config(layout.root, FFMPEG_TARGET if sys.platform == "win32" else None)
     print(f"Runtime ready in {layout.root}")
     print(f"Wrote {config}")
-    print("Restart ComfyUI to use the DLSS5 nodes.")
+    if sys.platform == "linux":
+        print("Next, build and configure the Wine worker: see native/README.md.")
+    else:
+        print("Restart ComfyUI to use the DLSS5 nodes.")
 
 
 if __name__ == "__main__":

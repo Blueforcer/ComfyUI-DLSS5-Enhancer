@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import os
+import shutil
+import signal
 import subprocess
+import sys
 import threading
 import time
 from typing import Any, NoReturn
@@ -63,16 +67,44 @@ class DlssSession:
         # Filesystem timestamps can lag slightly behind the clock.
         self._started_at = time.time() - 1.0
 
+        self._wine = sys.platform == "linux"
+        command = [str(layout.worker), "--video"]
+        environment = None
+        if self._wine:
+            wine = shutil.which(str(layout.config.get("wine_executable", "wine")))
+            if not wine:
+                raise RuntimeError("Wine was not found. Set wine_executable in config.json.")
+            if not (layout.wine_prefix / "system.reg").is_file():
+                raise RuntimeError(f"The DLSS Wine prefix is not initialized: {layout.wine_prefix}")
+            # Wine's default Z: mapping exposes absolute Unix paths to the host.
+            runtime_path = "Z:" + str(layout.root).replace("/", "\\")
+            command = [wine, str(layout.worker), runtime_path]
+            environment = os.environ.copy()
+            environment.update({
+                "WINEPREFIX": str(layout.wine_prefix),
+                "WINEDLLOVERRIDES": "d3d12,d3d12core,nvapi64,dxgi,_nvngx=n,b;winemenubuilder,mscoree,mshtml=d",
+                "DXVK_ENABLE_NVAPI": "1",
+                "DXVK_NVAPI_DRS_NGX_DLSS_NR_OVERRIDE": "on",
+                "DLSS5NR_DISABLE_OTHER_SINKS": "1",
+            })
+            environment.setdefault("WINEDEBUG", "-all")
+            environment.setdefault("VKD3D_DEBUG", "warn")
+            environment.setdefault("DXVK_LOG_LEVEL", "warn")
+
         try:
             self._worker = subprocess.Popen(
-                [str(layout.worker), "--video"],
-                cwd=str(layout.root),
+                command,
+                cwd=str(layout.worker.parent if self._wine else layout.root),
+                env=environment,
+                start_new_session=self._wine,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
         except OSError as exc:
+            if self._wine:
+                raise RuntimeError(f"The DLSS Wine worker could not be started: {exc}") from exc
             raise RuntimeError(
                 f"The native DLSS worker at {layout.worker} could not be started: {exc}. "
                 "It is an executable despite the .dll name, so antivirus software often "
@@ -181,6 +213,8 @@ class DlssSession:
         complete once that worker is gone. A log that was not touched since this
         session started belongs to an earlier worker and is discarded.
         """
+        if self._wine:
+            return ""
         path = self.layout.reshade_log
         try:
             if path.stat().st_mtime < self._started_at:
@@ -199,6 +233,8 @@ class DlssSession:
             raise RuntimeError(
                 "The feature-18 report is only available after the session is closed."
             )
+        if self._wine:
+            return verify_feature_18("\n".join(self.worker_logs), direct=True)
         return verify_feature_18(self.reshade_log())
 
     # -- streaming -----------------------------------------------------------
@@ -312,12 +348,19 @@ class DlssSession:
         self._closed = True
         if self._worker.poll() is None:
             try:
-                self._worker.terminate()
+                if self._wine:
+                    os.killpg(self._worker.pid, signal.SIGTERM)
+                else:
+                    self._worker.terminate()
                 self._worker.wait(timeout=10)
             except (OSError, subprocess.TimeoutExpired):
                 try:
-                    self._worker.kill()
-                except OSError:
+                    if self._wine:
+                        os.killpg(self._worker.pid, signal.SIGKILL)
+                    else:
+                        self._worker.kill()
+                    self._worker.wait(timeout=10)
+                except (OSError, subprocess.TimeoutExpired):
                     pass
         self._close_pipes()
         self._join_log_thread()
