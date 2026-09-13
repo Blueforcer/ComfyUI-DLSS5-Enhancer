@@ -39,19 +39,22 @@ def main() -> int:
     parser.add_argument("--height", type=int, default=512)
     parser.add_argument("--frames", type=int, default=5)
     parser.add_argument("--mode", default=UPSCALING_LABELS[0], choices=UPSCALING_LABELS)
+    parser.add_argument("--gpu-index", type=int, default=0, help="NVIDIA GPU index (default: 0)")
     parser.add_argument("--runtime-dir", default=None)
     arguments = parser.parse_args()
 
     layout = find_runtime(arguments.runtime_dir)
     print(f"runtime      : {layout.root}")
     print(f"worker       : {layout.worker}")
-    gpu = detect_gpu()
-    print(f"gpu          : {gpu['name']} (driver {gpu['driver']}, gen {gpu['generation']})")
+    gpu = detect_gpu(arguments.gpu_index)
+    print(
+        f"gpu (index {gpu['index']}): {gpu['name']} (driver {gpu['driver']}, gen {gpu['generation']})"
+    )
     bundle = inspect_bundle(layout)
     print(f"addon sha256 : {bundle['addon_sha256']}")
     print(f"neural sha256: {bundle['neural_sha256']}")
 
-    options = DlssOptions.create(upscaling_mode=arguments.mode)
+    options = DlssOptions.create(upscaling_mode=arguments.mode, gpu_index=arguments.gpu_index)
     with DlssSession(
         layout,
         options,

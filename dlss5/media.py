@@ -191,19 +191,25 @@ def resolve_quality(quality: str, codec: str, width: int, height: int, fps: floa
 
 
 @lru_cache(maxsize=64)
-def _encoder_available_cached(ffmpeg: str, encoder: str, width: int, height: int) -> bool:
-    return _probe_encoder(ffmpeg, encoder, width, height)
+def _encoder_available_cached(
+    ffmpeg: str, encoder: str, width: int, height: int, gpu_index: int = 0
+) -> bool:
+    return _probe_encoder(ffmpeg, encoder, width, height, gpu_index)
 
 
-def _encoder_available(ffmpeg: str, encoder: str, width: int, height: int) -> bool:
+def _encoder_available(
+    ffmpeg: str, encoder: str, width: int, height: int, gpu_index: int = 0
+) -> bool:
     """Re-probe once after a negative result, so a transient failure is not permanent."""
-    if _encoder_available_cached(ffmpeg, encoder, width, height):
+    if _encoder_available_cached(ffmpeg, encoder, width, height, gpu_index):
         return True
     _encoder_available_cached.cache_clear()
-    return _probe_encoder(ffmpeg, encoder, width, height)
+    return _probe_encoder(ffmpeg, encoder, width, height, gpu_index)
 
 
-def _probe_encoder(ffmpeg: str, encoder: str, width: int, height: int) -> bool:
+def _probe_encoder(
+    ffmpeg: str, encoder: str, width: int, height: int, gpu_index: int = 0
+) -> bool:
     """Check that this encoder can really take the requested size on this GPU."""
     command = [
         ffmpeg,
@@ -217,10 +223,10 @@ def _probe_encoder(ffmpeg: str, encoder: str, width: int, height: int) -> bool:
         "1",
         "-c:v",
         encoder,
-        "-f",
-        "null",
-        "-",
     ]
+    if encoder.endswith("_nvenc"):
+        command.extend(["-gpu", str(gpu_index)])
+    command.extend(["-f", "null", "-"])
     try:
         result = subprocess.run(
             command,
@@ -235,7 +241,12 @@ def _probe_encoder(ffmpeg: str, encoder: str, width: int, height: int) -> bool:
 
 
 def _codec_arguments(
-    layout: RuntimeLayout, codec: str, quality: dict, width: int, height: int
+    layout: RuntimeLayout,
+    codec: str,
+    quality: dict,
+    width: int,
+    height: int,
+    gpu_index: int = 0,
 ) -> tuple[list[str], str]:
     if codec == "ProRes Proxy":
         return ["-c:v", "prores_ks", "-profile:v", "0", "-pix_fmt", "yuv422p10le"], "prores_ks"
@@ -255,10 +266,20 @@ def _codec_arguments(
         "AV1": ("av1_nvenc", None),
     }
     hardware, software = plans[codec]
-    if _encoder_available(ffmpeg, hardware, width, height):
-        arguments = ["-c:v", hardware, "-preset", "p6", *nvenc_rate, "-pix_fmt", "yuv420p"]
+    if _encoder_available(ffmpeg, hardware, width, height, gpu_index=gpu_index):
+        arguments = [
+            "-c:v",
+            hardware,
+            "-gpu",
+            str(gpu_index),
+            "-preset",
+            "p6",
+            *nvenc_rate,
+            "-pix_fmt",
+            "yuv420p",
+        ]
         if codec != "AV1":
-            arguments[4:4] = ["-tune", "hq"]
+            arguments[6:6] = ["-tune", "hq"]
         return arguments, hardware
     if software is None:
         raise RuntimeError(
@@ -285,10 +306,11 @@ class RawFrameEncoder:
         height: int,
         rate: Fraction,
         time_base: Fraction,
+        gpu_index: int = 0,
     ) -> None:
         self.quality = resolve_quality(quality, codec, width, height, float(rate))
         arguments, self.encoder_name = _codec_arguments(
-            layout, codec, self.quality, width, height
+            layout, codec, self.quality, width, height, gpu_index=gpu_index
         )
         command = [
             str(layout.ffmpeg),

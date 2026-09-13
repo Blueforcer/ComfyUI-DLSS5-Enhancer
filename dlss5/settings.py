@@ -122,6 +122,7 @@ class DlssOptions:
     motion_mode: str = "auto"
     scene_change_threshold: float = 0.24
     flow_width: int = 640
+    gpu_index: int = 0
 
     @classmethod
     def create(cls, **values) -> "DlssOptions":
@@ -181,6 +182,13 @@ class DlssOptions:
                     f"flow width must be between {MIN_FLOW_WIDTH} and {MAX_FLOW_WIDTH}."
                 )
             values["flow_width"] = flow_width
+
+        gpu_index = values.get("gpu_index")
+        if gpu_index is not None:
+            gpu_index = int(gpu_index)
+            if gpu_index < 0:
+                raise ValueError("gpu index must be greater than or equal to 0.")
+            values["gpu_index"] = gpu_index
 
         mask = values.get("automatic_mask")
         if mask is not None and not isinstance(mask, bool):

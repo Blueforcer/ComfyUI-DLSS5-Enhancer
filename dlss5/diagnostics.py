@@ -103,11 +103,11 @@ def drain(stream: BinaryIO, ring: LogRing) -> None:
 
 
 @lru_cache(maxsize=1)
-def detect_gpu() -> dict[str, Any]:
-    """Identify the RTX GPU and reject generations DLSS 5 NR does not support."""
+def detect_gpus() -> list[dict[str, Any]]:
+    """Enumerate all NVIDIA GPUs present in the system via nvidia-smi."""
     command = [
         "nvidia-smi",
-        "--query-gpu=name,driver_version,memory.total,compute_cap",
+        "--query-gpu=index,name,driver_version,memory.total,compute_cap,pci.bus_id",
         "--format=csv,noheader,nounits",
     ]
     try:
@@ -123,24 +123,151 @@ def detect_gpu() -> dict[str, Any]:
             "nvidia-smi is unavailable; DLSS 5 needs an NVIDIA RTX GPU with a current driver."
         ) from exc
 
+    gpus: list[dict[str, Any]] = []
     for line in result.stdout.splitlines():
         parts = [part.strip() for part in line.split(",")]
-        if len(parts) < 4 or "RTX" not in parts[0].upper():
+        if len(parts) < 4:
             continue
-        name, driver, memory, capability = parts[:4]
+        idx = int(parts[0]) if parts[0].isdigit() else len(gpus)
+        name = parts[1]
+        driver = parts[2]
+        memory = int(parts[3]) if parts[3].isdigit() else 0
+        capability = parts[4] if len(parts) > 4 else ""
+        bus_id = parts[5] if len(parts) > 5 else ""
         match = re.search(r"RTX\s+(\d{2})", name.upper())
         generation = int(match.group(1)) if match else 0
-        if generation < 30:
-            raise RuntimeError(f"{name} is outside the supported RTX 30/40/50 scope.")
-        return {
+        gpus.append({
+            "index": idx,
             "name": name,
             "driver": driver,
-            "memory_mb": int(memory),
+            "memory_mb": memory,
             "compute_capability": capability,
             "generation": generation,
+            "pci_bus_id": bus_id,
             "beta": generation == 30,
-        }
-    raise RuntimeError("No supported NVIDIA RTX GPU was detected.")
+        })
+    if not gpus:
+        raise RuntimeError("No NVIDIA GPU was detected by nvidia-smi.")
+    return gpus
+
+
+@lru_cache(maxsize=16)
+def detect_gpu(index: int = 0) -> dict[str, Any]:
+    """Identify the RTX GPU with the given index and reject unsupported generations."""
+    gpus = detect_gpus()
+    target = next((gpu for gpu in gpus if gpu["index"] == index), None)
+    if target is None:
+        available = [f"GPU {g['index']}: {g['name']}" for g in gpus]
+        raise RuntimeError(
+            f"NVIDIA GPU with index {index} was not found. Detected GPUs: [{', '.join(available)}]."
+        )
+    if "RTX" not in target["name"].upper() or target["generation"] < 30:
+        raise RuntimeError(
+            f"{target['name']} (GPU {index}) is outside the supported RTX 30/40/50 scope."
+        )
+    return target
+
+
+def get_dxgi_adapters() -> list[dict[str, Any]]:
+    """Enumerate physical NVIDIA DXGI adapters using Windows DXGI API."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class LUID(ctypes.Structure):
+            _fields_ = [("LowPart", wintypes.DWORD), ("HighPart", wintypes.LONG)]
+
+        class DXGI_ADAPTER_DESC1(ctypes.Structure):
+            _fields_ = [
+                ("Description", wintypes.WCHAR * 128),
+                ("VendorId", wintypes.UINT),
+                ("DeviceId", wintypes.UINT),
+                ("SubSysId", wintypes.UINT),
+                ("Revision", wintypes.UINT),
+                ("DedicatedVideoMemory", ctypes.c_size_t),
+                ("DedicatedSystemMemory", ctypes.c_size_t),
+                ("SharedSystemMemory", ctypes.c_size_t),
+                ("AdapterLuid", LUID),
+                ("Flags", wintypes.UINT),
+            ]
+
+        class GUID(ctypes.Structure):
+            _fields_ = [
+                ("Data1", wintypes.DWORD),
+                ("Data2", wintypes.WORD),
+                ("Data3", wintypes.WORD),
+                ("Data4", wintypes.BYTE * 8),
+            ]
+
+        guid_factory1 = GUID(
+            0x50C83A1C,
+            0xE072,
+            0x4C48,
+            (wintypes.BYTE * 8)(0x87, 0xB0, 0x36, 0x30, 0xFA, 0x36, 0xA6, 0xD0),
+        )
+        factory = ctypes.c_void_p()
+        dxgi = ctypes.oledll.dxgi
+        if dxgi.CreateDXGIFactory1(ctypes.byref(guid_factory1), ctypes.byref(factory)) != 0:
+            return []
+
+        vtable = ctypes.cast(factory, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
+        EnumAdapters1_proto = ctypes.WINFUNCTYPE(
+            ctypes.c_long, ctypes.c_void_p, wintypes.UINT, ctypes.POINTER(ctypes.c_void_p)
+        )
+        EnumAdapters1 = EnumAdapters1_proto(vtable[12])
+
+        adapters = []
+        i = 0
+        while True:
+            adapter = ctypes.c_void_p()
+            if EnumAdapters1(factory, i, ctypes.byref(adapter)) != 0:
+                break
+            adapter_vtable = ctypes.cast(adapter, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))).contents
+            GetDesc1_proto = ctypes.WINFUNCTYPE(
+                ctypes.c_long, ctypes.c_void_p, ctypes.POINTER(DXGI_ADAPTER_DESC1)
+            )
+            GetDesc1 = GetDesc1_proto(adapter_vtable[10])
+            desc = DXGI_ADAPTER_DESC1()
+            GetDesc1(adapter, ctypes.byref(desc))
+            # 0x10DE = NVIDIA Vendor ID, Flags & 2 = DXGI_ADAPTER_FLAG_SOFTWARE
+            if desc.VendorId == 0x10DE and not (desc.Flags & 2):
+                adapters.append({
+                    "adapter_index": i,
+                    "name": desc.Description,
+                    "device_id": desc.DeviceId,
+                })
+            ctypes.WINFUNCTYPE(wintypes.ULONG, ctypes.c_void_p)(adapter_vtable[2])(adapter)
+            i += 1
+        ctypes.WINFUNCTYPE(wintypes.ULONG, ctypes.c_void_p)(vtable[2])(factory)
+        return adapters
+    except Exception:
+        return []
+
+
+def resolve_dxgi_adapter(gpu: dict[str, Any]) -> int:
+    """Map a detected nvidia-smi GPU to its corresponding DXGI adapter index."""
+    adapters = get_dxgi_adapters()
+    if not adapters:
+        return int(gpu.get("index", 0))
+
+    # Match by exact name
+    same_name_adapters = [a for a in adapters if a["name"].strip().lower() == gpu["name"].strip().lower()]
+    if same_name_adapters:
+        # Find which ordinal of this model this GPU is in nvidia-smi
+        all_gpus = detect_gpus()
+        same_name_gpus = [g for g in all_gpus if g["name"].strip().lower() == gpu["name"].strip().lower()]
+        try:
+            ordinal = same_name_gpus.index(gpu)
+            if ordinal < len(same_name_adapters):
+                return same_name_adapters[ordinal]["adapter_index"]
+        except ValueError:
+            pass
+        return same_name_adapters[0]["adapter_index"]
+
+    # Fallback to GPU index directly if within range
+    if gpu.get("index", 0) < len(adapters):
+        return adapters[gpu["index"]]["adapter_index"]
+    return int(gpu.get("index", 0))
 
 
 def file_sha256(path: Path) -> str:
@@ -164,9 +291,11 @@ def inspect_bundle(layout: RuntimeLayout) -> dict[str, Any]:
     }
 
 
-def ensure_supported(layout: RuntimeLayout) -> tuple[dict[str, Any], dict[str, Any]]:
+def ensure_supported(
+    layout: RuntimeLayout, gpu_index: int = 0
+) -> tuple[dict[str, Any], dict[str, Any], int]:
     """Validate GPU and runtime pairing before a session is started."""
-    gpu = detect_gpu()
+    gpu = detect_gpu(gpu_index)
     bundle = inspect_bundle(layout)
     if gpu["generation"] == 30 and not bundle["known_ampere_pair"]:
         raise RuntimeError(
@@ -174,7 +303,8 @@ def ensure_supported(layout: RuntimeLayout) -> tuple[dict[str, Any], dict[str, A
             "(RenoDX DLSS5 v4.70 + DLSS NR 310.8.SF-v2). Installed hashes are "
             f"add-on {bundle['addon_sha256']} and neural runtime {bundle['neural_sha256']}."
         )
-    return gpu, bundle
+    dxgi_adapter = resolve_dxgi_adapter(gpu)
+    return gpu, bundle, dxgi_adapter
 
 
 def relevant_lines(reshade_log: str, limit: int = 300) -> list[str]:
