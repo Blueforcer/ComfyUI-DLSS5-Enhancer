@@ -145,6 +145,15 @@ class DLSS5SettingsNode(io.ComfyNode):
                     tooltip="Extra frames the worker renders before the first output settles.",
                     advanced=True,
                 ),
+                io.Int.Input(
+                    "gpu_index",
+                    default=0,
+                    min=0,
+                    max=16,
+                    step=1,
+                    tooltip="Index of the NVIDIA GPU to use (matches nvidia-smi / CUDA GPU order).",
+                    advanced=True,
+                ),
                 io.String.Input(
                     "runtime_dir",
                     default="",
@@ -174,6 +183,7 @@ class DLSS5SettingsNode(io.ComfyNode):
         motion: str,
         scene_change_threshold: float,
         warmup_frames: int,
+        gpu_index: int,
         runtime_dir: str,
     ) -> io.NodeOutput:
         options = DlssOptions.create(
@@ -187,6 +197,7 @@ class DLSS5SettingsNode(io.ComfyNode):
             skin_structure_strength=skin_structure_strength,
             automatic_mask=bool(automatic_mask),
             warmup_frames=int(warmup_frames),
+            gpu_index=int(gpu_index),
             motion_mode=motion,
             scene_change_threshold=float(scene_change_threshold),
         )

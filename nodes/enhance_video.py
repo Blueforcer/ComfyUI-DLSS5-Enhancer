@@ -341,6 +341,7 @@ class DLSS5EnhanceVideoFile(io.ComfyNode):
                 height=session.output_height,
                 rate=metadata["rate"],
                 time_base=metadata["time_base"],
+                gpu_index=options.gpu_index,
             )
 
             prepared_bytes = session.render_width * session.render_height * 8

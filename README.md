@@ -156,9 +156,10 @@ the table notes.
 | `motion` | auto, optical_flow, none (auto) | Motion vectors for temporal accumulation. `auto` skips them for single images |
 | `scene_change_threshold` | 0.01 to 1.00 (0.24) | Mean luminance change above which temporal history resets |
 | `warmup_frames` | 0 to 16 (0) | Extra frames the worker renders before the first output settles |
+| `gpu_index` | 0 to 16 (0) | Index of the NVIDIA GPU to use (matches `nvidia-smi` / CUDA index) |
 | `runtime_dir` | path (empty) | Overrides runtime discovery |
 
-`motion`, `scene_change_threshold`, `warmup_frames` and `runtime_dir` are marked advanced and are
+`motion`, `scene_change_threshold`, `warmup_frames`, `gpu_index` and `runtime_dir` are marked advanced and are
 hidden until advanced widgets are shown.
 
 Output: `DLSS5_SETTINGS`.

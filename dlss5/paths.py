@@ -97,7 +97,114 @@ class RuntimeLayout:
                 + "\n\n"
                 + SETUP_HINT
             )
+        ensure_worker_patched(self.worker)
         return self
+
+
+def ensure_worker_patched(worker_path: Path) -> bool:
+    """Ensure the native worker supports GPU/adapter selection via DLSS5_ADAPTER.
+
+    The upstream worker hardcodes choosing the first NVIDIA adapter found.
+    We patch the adapter enumeration check in a small code cave to read
+    the DLSS5_ADAPTER environment variable. If DLSS5_ADAPTER is not set,
+    it behaves identically to the original unpatched binary.
+    """
+    if not worker_path.is_file():
+        return False
+    try:
+        data = bytearray(worker_path.read_bytes())
+    except OSError:
+        return False
+
+    cave_raw = 0xC570
+    hook_raw = 0x2799
+    if data[cave_raw : cave_raw + 14] == b"DLSS5_ADAPTER\x00":
+        return True
+
+    original_signature = bytes.fromhex("81bd00010000de1000007509f68530010000027442")
+    if data[hook_raw : hook_raw + len(original_signature)] != original_signature:
+        return False
+
+    cave_rva = 0xD170
+    hook_rva = 0x3399
+    str_bytes = b"DLSS5_ADAPTER\x00\x00"
+    code_start_rva = cave_rva + len(str_bytes)
+    getenv_iat_rva = 0xE348
+    next_adapter_rva = 0x33AE
+    found_nvidia_rva = 0x33F0
+
+    code = bytearray()
+    code += bytes.fromhex("81bd00010000de100000")
+    code += bytes.fromhex("7509")
+    code += bytes.fromhex("f6853001000002")
+    code += bytes.fromhex("7502")
+    code += bytes.fromhex("eb05")
+    disp_next = next_adapter_rva - (code_start_rva + len(code) + 5)
+    code += b"\xe9" + int.to_bytes(disp_next & 0xFFFFFFFF, 4, "little", signed=False)
+
+    code += bytes.fromhex("515241504151")
+    code += bytes.fromhex("4883ec28")
+
+    curr_rva = code_start_rva + len(code)
+    disp_str = cave_rva - (curr_rva + 7)
+    code += bytes.fromhex("488d0d") + int.to_bytes(disp_str & 0xFFFFFFFF, 4, "little", signed=False)
+
+    curr_rva = code_start_rva + len(code)
+    disp_iat = getenv_iat_rva - (curr_rva + 6)
+    code += bytes.fromhex("ff15") + int.to_bytes(disp_iat & 0xFFFFFFFF, 4, "little", signed=False)
+
+    code += bytes.fromhex("4883c428")
+    code += bytes.fromhex("415941585a59")
+
+    code += bytes.fromhex("4885c0")
+    match_label_offset = len(code)
+    code += bytes.fromhex("7400")
+
+    code += bytes.fromhex("31d2")
+    parse_loop_offset = len(code)
+    code += bytes.fromhex("0fb608")
+    code += bytes.fromhex("48ffc0")
+    code += bytes.fromhex("83e930")
+    code += bytes.fromhex("83f909")
+    ja_done_offset = len(code)
+    code += bytes.fromhex("7700")
+    code += bytes.fromhex("6bd20a")
+    code += bytes.fromhex("01ca")
+    jmp_loop_disp = parse_loop_offset - (len(code) + 2)
+    code += bytes.fromhex("eb") + int.to_bytes(jmp_loop_disp & 0xFF, 1, "little", signed=False)
+
+    done_parse_offset = len(code)
+    code[ja_done_offset + 1] = done_parse_offset - (ja_done_offset + 2)
+
+    code += bytes.fromhex("39d3")
+    je_match_offset = len(code)
+    code += bytes.fromhex("7400")
+
+    disp_next2 = next_adapter_rva - (code_start_rva + len(code) + 5)
+    code += b"\xe9" + int.to_bytes(disp_next2 & 0xFFFFFFFF, 4, "little", signed=False)
+
+    match_found_offset = len(code)
+    code[match_label_offset + 1] = match_found_offset - (match_label_offset + 2)
+    code[je_match_offset + 1] = match_found_offset - (je_match_offset + 2)
+
+    disp_found = found_nvidia_rva - (code_start_rva + len(code) + 5)
+    code += b"\xe9" + int.to_bytes(disp_found & 0xFFFFFFFF, 4, "little", signed=False)
+
+    data[cave_raw : cave_raw + len(str_bytes)] = str_bytes
+    data[cave_raw + len(str_bytes) : cave_raw + len(str_bytes) + len(code)] = code
+
+    disp_hook = code_start_rva - (hook_rva + 5)
+    hook_bytes = b"\xe9" + int.to_bytes(disp_hook & 0xFFFFFFFF, 4, "little", signed=False) + b"\x90" * 16
+    data[hook_raw : hook_raw + len(hook_bytes)] = hook_bytes
+
+    try:
+        bak = worker_path.with_suffix(".dll.bak")
+        if not bak.is_file():
+            bak.write_bytes(worker_path.read_bytes())
+        worker_path.write_bytes(data)
+        return True
+    except OSError:
+        return False
 
 
 def _read_config() -> dict:

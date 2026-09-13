@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import threading
 import time
@@ -18,7 +19,7 @@ from .diagnostics import (
     relevant_lines,
     verify_feature_18,
 )
-from .paths import RuntimeLayout
+from .paths import RuntimeLayout, ensure_worker_patched
 from .settings import DLSS_MODEL_PRESETS, DlssOptions, resolve_output_size
 
 
@@ -51,7 +52,10 @@ class DlssSession:
         self.options = options
         self.input_width = int(input_width)
         self.input_height = int(input_height)
-        self.gpu, self.bundle = ensure_supported(layout)
+        ensure_worker_patched(layout.worker)
+        self.gpu, self.bundle, self.dxgi_adapter = ensure_supported(
+            layout, options.gpu_index
+        )
         self.output_width, self.output_height = resolve_output_size(
             self.input_width, self.input_height, options.upscaling_factor
         )
@@ -63,6 +67,8 @@ class DlssSession:
         # Filesystem timestamps can lag slightly behind the clock.
         self._started_at = time.time() - 1.0
 
+        env = dict(os.environ)
+        env["DLSS5_ADAPTER"] = str(self.dxgi_adapter)
         try:
             self._worker = subprocess.Popen(
                 [str(layout.worker), "--video"],
@@ -70,6 +76,7 @@ class DlssSession:
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                env=env,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
         except OSError as exc:
