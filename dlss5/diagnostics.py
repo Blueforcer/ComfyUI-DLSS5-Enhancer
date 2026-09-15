@@ -130,6 +130,8 @@ def detect_gpu() -> dict[str, Any]:
         name, driver, memory, capability = parts[:4]
         match = re.search(r"RTX\s+(\d{2})", name.upper())
         generation = int(match.group(1)) if match else 0
+        if re.search(r"\bRTX\s+A6000\b", name.upper()) and capability == "8.6":
+            generation = 30
         if generation < 30:
             raise RuntimeError(f"{name} is outside the supported RTX 30/40/50 scope.")
         return {
