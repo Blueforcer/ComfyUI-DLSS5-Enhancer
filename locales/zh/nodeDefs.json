@@ -1,0 +1,137 @@
+{
+  "DLSS5Settings": {
+    "display_name": "DLSS5 设置",
+    "description": "NVIDIA DLSS 5 工作进程的神经渲染控制。连接到「DLSS5 增强图像」或「DLSS5 增强视频文件」节点。",
+    "inputs": {
+      "upscaling_mode": {
+        "name": "放大模式",
+        "tooltip": "DLSS 模式。1x（DLAA）在源分辨率上增强；其它模式同时按该倍数放大。"
+      },
+      "nr_preset": {
+        "name": "NR 预设",
+        "tooltip": "DLSS 模型内部的神经渲染预设。实测在当前构建上每个值输出相同。"
+      },
+      "nr_style": {
+        "name": "NR 风格",
+        "tooltip": "神经渲染的观感：Natural 更贴近源图，Cinematic 更强。"
+      },
+      "nr_intensity": {
+        "name": "NR 强度",
+        "tooltip": "神经渲染的整体强度。实测当前运行时高于 1.0 无更多效果；低于 1.0 用于向源图回混。"
+      },
+      "local_tone_strength": {
+        "name": "局部色调强度",
+        "tooltip": "局部色调映射强度。"
+      },
+      "local_structure_strength": {
+        "name": "局部结构强度",
+        "tooltip": "局部细节与结构重建强度。数值越高保留越多纹理；1.5 对 AI 生成内容是比较好的平衡。"
+      },
+      "skin_structure_strength": {
+        "name": "皮肤结构强度",
+        "tooltip": "皮肤与毛孔重建。依赖 automatic_mask（它告诉模型哪里是皮肤）；关掉遮罩时此参数无效。-1 交给模型自行决定。"
+      },
+      "automatic_mask": {
+        "name": "自动遮罩",
+        "tooltip": "让模型自动识别当作皮肤处理的区域，同时是 skin_structure_strength 的开关。"
+      },
+      "dlss_model_preset": {
+        "name": "DLSS 模型预设",
+        "tooltip": "强制使用特定 DLSS 模型而非 NVIDIA 默认。实测细节保留：Default、J、K 最柔和，L、M 能重建明显更多的皮肤与毛发纹理。若 worker 报告应用的预设不同，请设为 Default。"
+      },
+      "motion": {
+        "name": "运动模式",
+        "tooltip": "用于时间累积的运动向量。auto 对序列自动估计光流，对单张图跳过。"
+      },
+      "scene_change_threshold": {
+        "name": "场景切换阈值",
+        "tooltip": "平均亮度变化超过该值时重置时间历史。"
+      },
+      "warmup_frames": {
+        "name": "预热帧",
+        "tooltip": "worker 在首个输出稳定前额外渲染的帧数。"
+      },
+      "runtime_dir": {
+        "name": "运行时目录",
+        "tooltip": "可选的 DLSS 5 运行时目录（含 nvngx.dll 的文件夹）。留空则按 config.json、环境变量 DLSS5_RUNTIME_DIR 或内置 runtime 文件夹的顺序查找。"
+      }
+    }
+  },
+  "DLSS5EnhanceImages": {
+    "display_name": "DLSS5 增强图像",
+    "description": "在原生 worker 上对每张图像执行 NVIDIA DLSS 5 神经渲染（NGX feature 18）。按播放顺序输入视频帧，使时间累积生效。",
+    "inputs": {
+      "images": {
+        "name": "图像",
+        "tooltip": "按播放顺序的帧；批量顺序即时间顺序。"
+      },
+      "settings": {
+        "name": "设置",
+        "tooltip": "连接一个 DLSS5 设置节点。"
+      },
+      "verify_neural_rendering": {
+        "name": "校验神经渲染",
+        "tooltip": "当 ReShade 日志显示没有带签名的 feature-18 执行时使渲染失败，而不是静默返回普通放大的帧。"
+      }
+    },
+    "outputs": {
+      "0": {
+        "name": "图像"
+      }
+    }
+  },
+  "DLSS5EnhanceVideoFile": {
+    "display_name": "DLSS5 增强视频文件",
+    "description": "解码视频文件并对每一帧执行 NVIDIA DLSS 5 神经渲染后重新编码，保留原始时间戳、音频、章节和元数据。长视频不会作为批量进入工作流。",
+    "inputs": {
+      "video_path": {
+        "name": "视频路径",
+        "tooltip": "源视频文件的绝对路径。"
+      },
+      "settings": {
+        "name": "设置",
+        "tooltip": "连接一个 DLSS5 设置节点。"
+      },
+      "codec": {
+        "name": "编码器",
+        "tooltip": "H.264 与 HEVC 使用 NVENC 并带软件回退。AV1 需要 NVENC 且无回退。ProRes Proxy 为软件编码。"
+      },
+      "container": {
+        "name": "容器",
+        "tooltip": "MKV 直接复制音频和字幕。MP4 与 MOV 将音频转码为 AAC 并丢弃字幕。ProRes 需要 MOV 或 MKV。"
+      },
+      "quality": {
+        "name": "质量",
+        "tooltip": "Auto 根据分辨率和帧率推导码率，Good 翻倍，Best 四倍，Max 以恒定质量编码。ProRes Proxy 忽略此设置。"
+      },
+      "filename_prefix": {
+        "name": "文件名前缀",
+        "tooltip": "输出文件的前缀；会追加时间戳。"
+      },
+      "output_directory": {
+        "name": "输出目录",
+        "tooltip": "留空写入 ComfyUI 输出目录。相对路径在其内解析；绝对路径按原样使用。"
+      },
+      "max_frames": {
+        "name": "最大帧数",
+        "tooltip": "0 渲染整段视频；其它值渲染该帧数的预览。"
+      },
+      "copy_audio": {
+        "name": "复制音频",
+        "tooltip": "将原始音频（MKV 时连同字幕）封装进结果。章节和元数据始终保留。"
+      },
+      "verify_neural_rendering": {
+        "name": "校验神经渲染",
+        "tooltip": "渲染后检查 ReShade 日志中是否带签名的 feature-18 执行。无论是否通过都会写入文件。"
+      }
+    },
+    "outputs": {
+      "0": {
+        "name": "视频路径"
+      },
+      "1": {
+        "name": "帧数"
+      }
+    }
+  }
+}

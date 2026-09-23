@@ -6,6 +6,9 @@ from comfy_api.latest import ComfyExtension, io
 
 from .nodes import DLSS5EnhanceImages, DLSS5EnhanceVideoFile, DLSS5SettingsNode
 
+# Served at /extensions/<pkg> so the frontend can load per-node "documentation" docs from web/docs/<node>/<locale>.md.
+WEB_DIRECTORY = "./web"
+
 
 class Dlss5Extension(ComfyExtension):
     @override

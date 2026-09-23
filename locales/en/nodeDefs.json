@@ -1,0 +1,137 @@
+{
+  "DLSS5Settings": {
+    "display_name": "DLSS5 Settings",
+    "description": "Neural-rendering controls for the NVIDIA DLSS 5 worker. Connect to DLSS5 Enhance Images or DLSS5 Enhance Video File.",
+    "inputs": {
+      "upscaling_mode": {
+        "name": "Upscaling Mode",
+        "tooltip": "DLSS mode. 1x (DLAA) enhances at the source resolution; the other modes also upscale by that factor."
+      },
+      "nr_preset": {
+        "name": "NR Preset",
+        "tooltip": "Neural rendering preset inside the DLSS model. Measured to produce identical output at every value on current builds."
+      },
+      "nr_style": {
+        "name": "NR Style",
+        "tooltip": "Look of the neural pass: Natural stays closer to the source, Cinematic is stronger."
+      },
+      "nr_intensity": {
+        "name": "NR Intensity",
+        "tooltip": "Overall strength of the neural rendering pass. Measured on current runtime builds, values above 1.0 have no further effect; use below 1.0 to blend back towards the source."
+      },
+      "local_tone_strength": {
+        "name": "Local Tone Strength",
+        "tooltip": "Local tone mapping strength."
+      },
+      "local_structure_strength": {
+        "name": "Local Structure Strength",
+        "tooltip": "Local detail and structure reconstruction. Higher keeps more texture; 1.5 is a good balance for AI generated footage."
+      },
+      "skin_structure_strength": {
+        "name": "Skin Structure Strength",
+        "tooltip": "Skin and pore reconstruction. Requires automatic_mask, which is what tells the model where skin is; with the mask off this control does nothing. -1 leaves it to the model."
+      },
+      "automatic_mask": {
+        "name": "Automatic Mask",
+        "tooltip": "Let the model detect the regions it treats as skin. Also the gate for skin_structure_strength."
+      },
+      "dlss_model_preset": {
+        "name": "DLSS Model Preset",
+        "tooltip": "Force a specific DLSS model instead of NVIDIA's choice. Measured detail retention: Default, J and K are the softest, L and M reconstruct markedly more skin and hair texture. Set to Default if the worker reports a different applied preset."
+      },
+      "motion": {
+        "name": "Motion",
+        "tooltip": "Motion vectors for temporal accumulation. auto estimates optical flow for sequences and skips it for single images."
+      },
+      "scene_change_threshold": {
+        "name": "Scene Change Threshold",
+        "tooltip": "Mean luminance change above which temporal history is reset."
+      },
+      "warmup_frames": {
+        "name": "Warmup Frames",
+        "tooltip": "Extra frames the worker renders before the first output settles."
+      },
+      "runtime_dir": {
+        "name": "Runtime Directory",
+        "tooltip": "Optional path to a DLSS 5 runtime directory (the folder holding nvngx.dll). Empty uses config.json, DLSS5_RUNTIME_DIR or the bundled runtime folder."
+      }
+    }
+  },
+  "DLSS5EnhanceImages": {
+    "display_name": "DLSS5 Enhance Images",
+    "description": "Runs every image through NVIDIA DLSS 5 neural rendering (NGX feature 18) on the native worker. Feed video frames in playback order so temporal accumulation works.",
+    "inputs": {
+      "images": {
+        "name": "Images",
+        "tooltip": "Frames in playback order; the batch order is the temporal order."
+      },
+      "settings": {
+        "name": "Settings",
+        "tooltip": "Connect a DLSS5 Settings node."
+      },
+      "verify_neural_rendering": {
+        "name": "Verify Neural Rendering",
+        "tooltip": "Fail the render when the ReShade log shows no signed feature-18 execution, instead of silently returning plain upscaled frames."
+      }
+    },
+    "outputs": {
+      "0": {
+        "name": "Images"
+      }
+    }
+  },
+  "DLSS5EnhanceVideoFile": {
+    "display_name": "DLSS5 Enhance Video File",
+    "description": "Decodes a video file, runs every frame through NVIDIA DLSS 5 neural rendering and re-encodes it, keeping the original timestamps, audio, chapters and metadata. Long videos never enter the workflow as a batch.",
+    "inputs": {
+      "video_path": {
+        "name": "Video Path",
+        "tooltip": "Absolute path to the source video file."
+      },
+      "settings": {
+        "name": "Settings",
+        "tooltip": "Connect a DLSS5 Settings node."
+      },
+      "codec": {
+        "name": "Codec",
+        "tooltip": "H.264 and HEVC use NVENC with a software fallback. AV1 needs NVENC and has no fallback. ProRes Proxy encodes in software."
+      },
+      "container": {
+        "name": "Container",
+        "tooltip": "MKV stream copies audio and subtitles. MP4 and MOV re-encode audio to AAC and drop subtitles. ProRes needs MOV or MKV."
+      },
+      "quality": {
+        "name": "Quality",
+        "tooltip": "Auto derives a bitrate from resolution and frame rate, Good doubles it, Best quadruples it, Max encodes at constant quality. Ignored for ProRes Proxy."
+      },
+      "filename_prefix": {
+        "name": "Filename Prefix",
+        "tooltip": "Prefix of the output file; a timestamp is appended."
+      },
+      "output_directory": {
+        "name": "Output Directory",
+        "tooltip": "Empty writes to the ComfyUI output directory. A relative path is resolved inside it; an absolute path is used as given."
+      },
+      "max_frames": {
+        "name": "Max Frames",
+        "tooltip": "0 renders the whole video; any other value renders a preview of that many frames."
+      },
+      "copy_audio": {
+        "name": "Copy Audio",
+        "tooltip": "Mux the original audio, and with MKV the subtitles, into the result. Chapters and metadata are kept either way."
+      },
+      "verify_neural_rendering": {
+        "name": "Verify Neural Rendering",
+        "tooltip": "Check the ReShade log for signed feature-18 execution after the render. The file is written either way."
+      }
+    },
+    "outputs": {
+      "0": {
+        "name": "Video Path"
+      },
+      "1": {
+        "name": "Frames"
+      }
+    }
+  }
+}
