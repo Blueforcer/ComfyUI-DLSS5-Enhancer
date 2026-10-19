@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 import threading
 import time
 from typing import Any, NoReturn
 
 import numpy as np
 
-from . import protocol
+from . import protocol, workers
 from .diagnostics import (
     LogRing,
     describe_worker_failure,
@@ -52,6 +53,9 @@ class DlssSession:
         self.input_width = int(input_width)
         self.input_height = int(input_height)
         self.gpu, self.bundle = ensure_supported(layout)
+        # Fails here, before the worker starts, when the Linux staging pieces
+        # (patched carrier, driver bridge) are still missing.
+        layout.require_linux_staging()
         self.output_width, self.output_height = resolve_output_size(
             self.input_width, self.input_height, options.upscaling_factor
         )
@@ -64,19 +68,28 @@ class DlssSession:
         self._started_at = time.time() - 1.0
 
         try:
-            self._worker = subprocess.Popen(
-                [str(layout.worker), "--video"],
-                cwd=str(layout.root),
+            # On Linux the workers module wraps this in Wine with the saved
+            # worker-only environment and a dedicated process group.
+            self._worker = workers.WorkerProcess(
+                layout.worker,
+                "--video",
+                cwd=str(layout.session_root),
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
         except OSError as exc:
+            if sys.platform == "win32":
+                hint = (
+                    " It is an executable despite the .dll name, so antivirus "
+                    "software often quarantines or blocks it. Add the runtime "
+                    "folder to the exclusion list."
+                )
+            else:
+                hint = " Check the Wine prefix and settings; see docs/linux.md."
             raise RuntimeError(
-                f"The native DLSS worker at {layout.worker} could not be started: {exc}. "
-                "It is an executable despite the .dll name, so antivirus software often "
-                "quarantines or blocks it. Add the runtime folder to the exclusion list."
+                f"The native DLSS worker at {layout.worker} could not be "
+                f"started: {exc}.{hint}"
             ) from exc
 
         try:

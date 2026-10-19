@@ -4,6 +4,8 @@ __pycache__/
 # Runtime binaries and local setup: never committed, see install_runtime.py
 config.json
 runtime/
+runtime-linux/
+linux-runtime.json
 ffmpeg/
 
 # Belt and braces: no native binary or archive belongs in this repository

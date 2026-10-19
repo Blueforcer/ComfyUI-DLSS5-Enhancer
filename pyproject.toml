@@ -17,4 +17,4 @@ Issues = "https://github.com/Blueforcer/ComfyUI-DLSS5-Enhancer/issues"
 PublisherId = "blueforcer"
 DisplayName = "ComfyUI DLSS5 Enhancer"
 Repository = "https://github.com/Blueforcer/ComfyUI-DLSS5-Enhancer"
-supported_os = ["windows"]
+supported_os = ["windows", "linux"]
