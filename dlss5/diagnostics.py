@@ -102,6 +102,28 @@ def drain(stream: BinaryIO, ring: LogRing) -> None:
             pass
 
 
+# Compute capability -> the RTX generation DLSS 5 NR knows it as. Workstation cards do not carry the
+# generation in their name (RTX PRO 6000 Blackwell, RTX A6000, RTX 6000 Ada Generation), and Turing's
+# Quadro RTX 8000 would read as "80", so the capability decides when nvidia-smi reports one.
+def gpu_generation(name: str, capability: str = "") -> int:
+    """The RTX generation (30, 40, 50) of a GPU, or 0 when DLSS 5 NR does not support it."""
+    try:
+        major, minor = (int(part) for part in capability.strip().split(".")[:2])
+    except ValueError:
+        major = minor = -1
+    if major >= 12:
+        return 50  # Blackwell (sm_120): GeForce RTX 50, RTX PRO Blackwell
+    if (major, minor) == (8, 9):
+        return 40  # Ada Lovelace: GeForce RTX 40, RTX 6000 Ada
+    if (major, minor) == (8, 6):
+        return 30  # Ampere: GeForce RTX 30, RTX A6000 (the experimental path)
+    if major >= 0:
+        return 0  # Turing or older (Quadro RTX 8000 is 7.5), or a non-RTX part
+    # no capability reported (an older driver): the name, as before
+    match = re.search(r"RTX\s+(\d{2})", name.upper())
+    return int(match.group(1)) if match else 0
+
+
 @lru_cache(maxsize=1)
 def detect_gpu() -> dict[str, Any]:
     """Identify the RTX GPU and reject generations DLSS 5 NR does not support."""
@@ -128,8 +150,7 @@ def detect_gpu() -> dict[str, Any]:
         if len(parts) < 4 or "RTX" not in parts[0].upper():
             continue
         name, driver, memory, capability = parts[:4]
-        match = re.search(r"RTX\s+(\d{2})", name.upper())
-        generation = int(match.group(1)) if match else 0
+        generation = gpu_generation(name, capability)
         if generation < 30:
             raise RuntimeError(f"{name} is outside the supported RTX 30/40/50 scope.")
         return {
